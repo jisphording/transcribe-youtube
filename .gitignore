@@ -1,0 +1,15 @@
+# Dependencies
+obsidian-plugin/node_modules/
+
+# Build output
+obsidian-plugin/main.js
+
+# Environment variables
+backend/.env
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

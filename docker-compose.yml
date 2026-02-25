@@ -1,0 +1,12 @@
+services:
+  youtube-to-obsidian:
+    build: ./backend
+    container_name: youtube-to-obsidian-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    restart: unless-stopped
+    volumes:
+      # Mount backend source for live reload during development
+      - ./backend:/app
