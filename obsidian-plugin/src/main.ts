@@ -14,11 +14,13 @@ import {
 interface YTObsidianSettings {
   apiUrl: string;
   outputFolder: string;
+  cookieBrowser: string;
 }
 
 const DEFAULT_SETTINGS: YTObsidianSettings = {
   apiUrl: "http://localhost:8000",
   outputFolder: "YouTube",
+  cookieBrowser: "",
 };
 
 // ─── Plugin ──────────────────────────────────────────────────────────────────
@@ -76,6 +78,7 @@ export default class YTObsidianPlugin extends Plugin {
 class YouTubeImportModal extends Modal {
   plugin: YTObsidianPlugin;
   urlInput: HTMLInputElement;
+  extendedSummaryCheckbox: HTMLInputElement;
   statusEl: HTMLElement;
   importBtn: HTMLButtonElement;
 
@@ -110,6 +113,34 @@ class YouTubeImportModal extends Modal {
     this.urlInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.startImport();
     });
+
+    // Extended Summary checkbox
+    const checkboxWrapper = contentEl.createDiv({ cls: "yt-obsidian-checkbox-wrapper" });
+    checkboxWrapper.style.marginTop = "12px";
+    checkboxWrapper.style.display = "flex";
+    checkboxWrapper.style.alignItems = "center";
+    checkboxWrapper.style.gap = "8px";
+
+    this.extendedSummaryCheckbox = checkboxWrapper.createEl("input", {
+      type: "checkbox",
+    });
+    this.extendedSummaryCheckbox.id = "yt-extended-summary";
+
+    const checkboxLabel = checkboxWrapper.createEl("label", {
+      text: "Create extended summary",
+    });
+    checkboxLabel.htmlFor = "yt-extended-summary";
+    checkboxLabel.style.cursor = "pointer";
+    checkboxLabel.style.fontSize = "14px";
+
+    const checkboxDesc = contentEl.createDiv({ cls: "yt-obsidian-checkbox-desc" });
+    checkboxDesc.setText(
+      "Adds a detailed topic-by-topic editorial summary between the summary and transcript. Increases processing time."
+    );
+    checkboxDesc.style.fontSize = "12px";
+    checkboxDesc.style.color = "var(--text-muted)";
+    checkboxDesc.style.marginTop = "2px";
+    checkboxDesc.style.marginBottom = "4px";
 
     // Status message
     this.statusEl = contentEl.createDiv({ cls: "yt-obsidian-status" });
@@ -151,40 +182,114 @@ class YouTubeImportModal extends Modal {
 
     this.importBtn.disabled = true;
     this.urlInput.disabled = true;
-    this.setStatus("⏳ Fetching transcript and metadata…", "info");
+    this.setStatus("⏳ Connecting to backend…", "info");
 
     try {
       const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
+      const body: Record<string, string | boolean> = { url };
+      if (this.plugin.settings.cookieBrowser) {
+        body.cookie_browser = this.plugin.settings.cookieBrowser;
+      }
+      if (this.extendedSummaryCheckbox.checked) {
+        body.extended_summary = true;
+      }
+
       const response = await fetch(`${apiUrl}/process`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
-        const err = await response.json().catch(() => ({ detail: response.statusText }));
+        const err = await response
+          .json()
+          .catch(() => ({ detail: response.statusText }));
         throw new Error(err.detail || `Server error ${response.status}`);
       }
 
-      this.setStatus("🤖 Claude is processing the transcript…", "info");
+      // Parse SSE stream
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let doneData: { filename: string; content: string } | null = null;
 
-      const data = await response.json();
-      const { filename, content } = data;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      this.setStatus("💾 Creating note in vault…", "info");
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-      const file = await this.plugin.createNote(filename, content);
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const jsonStr = line.slice(6).trim();
+          if (!jsonStr) continue;
 
-      new Notice(`✅ Created: ${file.path}`);
-      this.setStatus(`✅ Done! Note saved as "${file.path}"`, "success");
+          let event: Record<string, unknown>;
+          try {
+            event = JSON.parse(jsonStr);
+          } catch {
+            continue;
+          }
 
-      // Open the note
+          const stage = event.stage as string;
+          const message = event.message as string;
+
+          switch (stage) {
+            case "metadata":
+              this.setStatus(`⏳ ${message}`, "info");
+              break;
+            case "metadata_done":
+              this.setStatus(`✓ ${message}`, "info");
+              break;
+            case "transcript":
+              this.setStatus(`⏳ ${message}`, "info");
+              break;
+            case "transcript_done":
+              this.setStatus(`✓ ${message}`, "info");
+              break;
+            case "claude":
+              this.setStatus(`🤖 ${message}`, "info");
+              break;
+            case "claude_extended":
+              this.setStatus(`🤖 ${message}`, "info");
+              break;
+            case "building":
+              this.setStatus(`💾 ${message}`, "info");
+              break;
+            case "done":
+              doneData = {
+                filename: event.filename as string,
+                content: event.content as string,
+              };
+              break;
+            case "error":
+              throw new Error(message);
+          }
+        }
+      }
+
+      if (!doneData) {
+        throw new Error("Stream ended without result.");
+      }
+
+      const file = await this.plugin.createNote(
+        doneData.filename,
+        doneData.content
+      );
+
+      new Notice(`Created: ${file.path}`);
+      this.setStatus(`Done! Note saved as "${file.path}"`, "success");
+
       await this.app.workspace.openLinkText(file.path, "", false);
-
       setTimeout(() => this.close(), 1500);
     } catch (error) {
       console.error("[YT Obsidian]", error);
-      this.setStatus(`❌ Error: ${error.message}`, "error");
+      this.setStatus(`❌ ${error.message}`, "error");
       this.importBtn.disabled = false;
       this.urlInput.disabled = false;
     }
@@ -227,6 +332,103 @@ class YTObsidianSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    new Setting(containerEl)
+      .setName("Browser for Cookies")
+      .setDesc(
+        "Extract cookies directly from a browser where you're logged into YouTube. Fixes 'Sign in to confirm you're not a bot' errors."
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions({
+            "": "None (disabled)",
+            chrome: "Chrome",
+            firefox: "Firefox",
+            safari: "Safari",
+            edge: "Edge",
+            brave: "Brave",
+          })
+          .setValue(this.plugin.settings.cookieBrowser)
+          .onChange(async (value) => {
+            this.plugin.settings.cookieBrowser = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    const cookieSetting = new Setting(containerEl)
+      .setName("YouTube Cookie File (fallback)")
+      .setDesc(
+        "Upload a Netscape cookies.txt file to the backend. Use this if the browser option above doesn't work. Export with a browser extension like 'Get cookies.txt LOCALLY'."
+      );
+
+    const cookieStatusEl = containerEl.createDiv({ cls: "yt-obsidian-cookie-status" });
+    cookieStatusEl.style.fontSize = "12px";
+    cookieStatusEl.style.marginTop = "-8px";
+    cookieStatusEl.style.marginBottom = "12px";
+    cookieStatusEl.style.paddingLeft = "18px";
+
+    const refreshCookieStatus = async () => {
+      try {
+        const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
+        const resp = await fetch(`${apiUrl}/cookies`);
+        const data = await resp.json();
+        if (data.has_cookies) {
+          cookieStatusEl.setText("Cookie file is uploaded on the backend.");
+          cookieStatusEl.style.color = "var(--text-success)";
+        } else {
+          cookieStatusEl.setText("No cookie file on the backend.");
+          cookieStatusEl.style.color = "var(--text-muted)";
+        }
+      } catch {
+        cookieStatusEl.setText("Could not reach backend.");
+        cookieStatusEl.style.color = "var(--text-error)";
+      }
+    };
+    refreshCookieStatus();
+
+    // Hidden file input for native file picker
+    const fileInput = containerEl.createEl("input", { type: "file" });
+    fileInput.accept = ".txt";
+    fileInput.style.display = "none";
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      const content = await file.text();
+      try {
+        const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
+        const resp = await fetch(`${apiUrl}/cookies`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        });
+        if (!resp.ok) throw new Error("Upload failed");
+        new Notice("Cookie file uploaded to backend.");
+      } catch {
+        new Notice("Failed to upload cookie file. Is the backend running?");
+      }
+      fileInput.value = "";
+      refreshCookieStatus();
+    });
+
+    cookieSetting.addButton((btn) =>
+      btn.setButtonText("Browse...").onClick(() => fileInput.click())
+    );
+
+    cookieSetting.addButton((btn) =>
+      btn
+        .setButtonText("Remove")
+        .setWarning()
+        .onClick(async () => {
+          try {
+            const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
+            await fetch(`${apiUrl}/cookies`, { method: "DELETE" });
+            new Notice("Cookie file removed from backend.");
+          } catch {
+            new Notice("Failed to remove cookie file.");
+          }
+          refreshCookieStatus();
+        })
+    );
 
     new Setting(containerEl)
       .setName("Output Folder")
