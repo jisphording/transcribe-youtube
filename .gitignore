@@ -7,6 +7,9 @@ obsidian-plugin/main.js
 # Environment variables
 backend/.env
 
+# Local
+cookies.txt
+
 # Python
 __pycache__/
 *.pyc
