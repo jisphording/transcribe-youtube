@@ -1,4 +1,4 @@
-# YouTube → Obsidian
+# Transcribe YouTube → Obsidian
 
 Import any YouTube video as a clean, structured Obsidian note — complete with metadata, Claude-generated summary, and a cleaned transcript organized into chapters.
 
@@ -71,7 +71,7 @@ More text...
 # Place the project somewhere sensible
 cd ~/Developer
 # (copy or clone the project here)
-cd yt-to-obsidian
+cd youtube-to-obsidian
 ```
 
 ### 2. Configure your API key
@@ -115,7 +115,7 @@ This produces a `main.js` file.
 
 1. Open your vault in Finder
 2. Navigate to `.obsidian/plugins/`
-3. Create a folder: `yt-to-obsidian`
+3. Create a folder: `youtube-to-obsidian`
 4. Copy these three files into it:
    - `obsidian-plugin/main.js`
    - `obsidian-plugin/manifest.json`
@@ -137,6 +137,8 @@ Click the YouTube icon in the left sidebar ribbon.
 2. Hit **Import** (or press Enter)
 3. Wait ~15–30 seconds (depends on video length)
 4. The new note opens automatically in your vault ✅
+
+With very long videos above 90 minutes the reliability starts to drop.
 
 ---
 
@@ -183,7 +185,7 @@ Check your `ANTHROPIC_API_KEY` in `.env` is correct and has sufficient credits.
 ## Project Structure
 
 ```
-yt-to-obsidian/
+youtube-to-obsidian/
 ├── backend/
 │   ├── main.py              # FastAPI app
 │   └── requirements.txt
