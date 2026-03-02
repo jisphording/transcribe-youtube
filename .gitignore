@@ -6,6 +6,7 @@ obsidian-plugin/main.js
 
 # Environment variables
 backend/.env
+obsidian-plugin/.env
 
 # Local
 cookies.txt
