@@ -31,6 +31,7 @@ class TranscriptRequest(BaseModel):
     url: str
     cookie_browser: str | None = None
     cookie_file: str | None = None
+    extended_summary: bool = False
 
 
 def extract_video_id(url: str) -> str:
@@ -181,7 +182,7 @@ def slugify(title: str) -> str:
     return slug
 
 
-def build_obsidian_note(metadata: dict, summary: str, transcript_md: str) -> tuple[str, str]:
+def build_obsidian_note(metadata: dict, summary: str, transcript_md: str, extended_summary: str = "") -> tuple[str, str]:
     """Returns (filename, markdown_content)."""
     filename = slugify(metadata["title"]) + ".md"
 
@@ -203,6 +204,14 @@ tags:
 
 """
 
+    extended_summary_section = ""
+    if extended_summary.strip():
+        extended_summary_section = (
+            "## Extended Summary\n\n"
+            + extended_summary.strip()
+            + "\n\n---\n\n"
+        )
+
     note = (
         frontmatter
         + thumbnail_line
@@ -215,6 +224,7 @@ tags:
         + "## Summary\n\n"
         + summary.strip()
         + "\n\n---\n\n"
+        + extended_summary_section
         + "## Transcript\n\n"
         + transcript_md.strip()
         + "\n"
@@ -242,6 +252,51 @@ Rules for the transcript:
   **Speaker B:** Their response here.
   Use generic labels (Host, Guest, Speaker 1, etc.) unless names are clearly mentioned.
 - Break the transcript into logical chapters using ## headings (Markdown h2). 
+  For short videos (< 10 min): 2-4 chapters.
+  For medium videos (10-30 min): 4-8 chapters.
+  For long videos (> 30 min): 8-15 chapters.
+- Chapter headings should be descriptive and reflect the content of that section.
+- Do NOT include timestamps.
+- Do NOT add any content that wasn't in the original transcript.
+- Preserve paragraph breaks for readability — group related sentences together.
+
+Return ONLY the JSON object, no other text."""
+
+
+SYSTEM_PROMPT_EXTENDED = """You are an expert transcript editor, summarizer, and editorial writer.
+Your job is to process a raw YouTube transcript and return a clean, well-structured result.
+
+You will receive:
+- Video metadata (title, channel, description)
+- Raw transcript text
+
+You must return a valid JSON object with exactly three keys:
+1. "summary": A concise 3-5 sentence summary of the video's main content and key takeaways.
+2. "extended_summary": A thorough, topic-by-topic editorial summary of the entire video.
+3. "transcript": The cleaned transcript in Markdown format.
+
+Rules for "summary":
+- 3-5 sentences maximum.
+- Capture the main argument, key takeaways, and conclusion.
+
+Rules for "extended_summary":
+- Cover every major topic raised in the video in the order it appears.
+- Consolidate and rewrite ideas for clarity — do not copy-paste from the transcript.
+- Write in a serious, editorial tone suitable for a professional audience.
+- Use ## Markdown headings for each topic section.
+- Each section should be several paragraphs of synthesized prose.
+- Length is determined by the content: aim to be comprehensive without padding.
+- Do NOT include timestamps or meta-commentary about the video format.
+- This should read as a standalone document — someone who has not watched the video should come away fully informed.
+
+Rules for "transcript":
+- Remove ALL filler words: "um", "uh", "like", "you know", "sort of", "kind of", "basically", "literally", "actually", "right", "okay so", "so yeah", "I mean", etc.
+- Keep the content as close to the original wording as possible — do not paraphrase or rewrite sentences.
+- If there are clearly multiple speakers (e.g. interview format), format as:
+  **Speaker A:** Their text here.
+  **Speaker B:** Their response here.
+  Use generic labels (Host, Guest, Speaker 1, etc.) unless names are clearly mentioned.
+- Break the transcript into logical chapters using ## headings (Markdown h2).
   For short videos (< 10 min): 2-4 chapters.
   For medium videos (10-30 min): 4-8 chapters.
   For long videos (> 30 min): 8-15 chapters.
@@ -295,7 +350,11 @@ async def process_video(request: TranscriptRequest):
             yield _sse_event("transcript_done", f"Got transcript ({len(entries)} segments)")
 
             # Stage 3: Claude processing
-            yield _sse_event("claude", "Claude is processing the transcript...")
+            system_prompt = SYSTEM_PROMPT_EXTENDED if request.extended_summary else SYSTEM_PROMPT
+            if request.extended_summary:
+                yield _sse_event("claude", "Claude is processing transcript and writing extended summary...")
+            else:
+                yield _sse_event("claude", "Claude is processing the transcript...")
 
             duration_note = f"Video duration: {metadata['duration']}"
             user_message = f"""Video Title: {metadata['title']}
@@ -313,17 +372,18 @@ Please process this transcript according to the instructions."""
             try:
                 raw_response = ""
                 token_count = 0
+                stage_label = "claude_extended" if request.extended_summary else "claude"
                 with client.messages.stream(
                     model="claude-opus-4-6",
                     max_tokens=128000,
-                    system=SYSTEM_PROMPT,
+                    system=system_prompt,
                     messages=[{"role": "user", "content": user_message}],
                 ) as stream:
                     for text in stream.text_stream:
                         raw_response += text
                         token_count += 1
                         if token_count % 100 == 0:
-                            yield _sse_event("claude", f"Claude is writing... ({token_count * 4} chars generated)")
+                            yield _sse_event(stage_label, f"Claude is writing... ({token_count * 4} chars generated)")
             except Exception as e:
                 yield _sse_event("error", f"Claude API error: {e}")
                 return
@@ -341,11 +401,12 @@ Please process this transcript according to the instructions."""
                 return
 
             summary = result.get("summary", "")
+            extended_summary = result.get("extended_summary", "") if request.extended_summary else ""
             transcript_md = result.get("transcript", "")
 
             # Stage 4: Build note
             yield _sse_event("building", "Building Obsidian note...")
-            filename, note_content = build_obsidian_note(metadata, summary, transcript_md)
+            filename, note_content = build_obsidian_note(metadata, summary, transcript_md, extended_summary=extended_summary)
 
             yield _sse_event("done", "Done!", filename=filename, content=note_content, metadata=metadata)
 
