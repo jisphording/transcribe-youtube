@@ -42,6 +42,18 @@ A 3-5 sentence summary of the key takeaways...
 
 ---
 
+## Extended Summary  ← (optional, when enabled)
+
+### Topic One: The Core Argument
+
+Several paragraphs of synthesized editorial prose covering this topic...
+
+### Topic Two: Practical Applications
+
+More prose...
+
+---
+
 ## Transcript
 
 ## Introduction
@@ -52,6 +64,19 @@ Cleaned transcript text without filler words, broken into chapters...
 
 More text...
 ```
+
+---
+
+## Features
+
+### Model Selection
+Choose between **Sonnet** (faster, cheaper) and **Opus** (higher quality) directly in the import dialog. Defaults to Sonnet.
+
+### Extended Summary
+Check **"Create extended summary"** in the import dialog to add a comprehensive, topic-by-topic editorial rewrite between the summary and transcript. This reads like a standalone document written for a professional audience — useful for long conversations where you want a condensed but thorough version without watching the whole video.
+
+### Cookie Support
+Handle age-restricted or region-locked videos by providing YouTube cookies via browser extraction or a `cookies.txt` file upload.
 
 ---
 
@@ -134,9 +159,11 @@ Click the YouTube icon in the left sidebar ribbon.
 
 ### Then:
 1. Paste your YouTube URL
-2. Hit **Import** (or press Enter)
-3. Wait ~15–30 seconds (depends on video length)
-4. The new note opens automatically in your vault ✅
+2. Select a model (Sonnet or Opus)
+3. Optionally check **"Create extended summary"**
+4. Hit **Import** (or press Enter)
+5. Wait ~15–30 seconds (depends on video length and model choice)
+6. The new note opens automatically in your vault
 
 With very long videos above 90 minutes the reliability starts to drop.
 
@@ -149,17 +176,63 @@ Go to **Settings → YouTube to Obsidian**:
 | Setting | Default | Description |
 |---|---|---|
 | Backend API URL | `http://localhost:8000` | Where your Python server runs |
+| Browser for Cookies | None | Extract YouTube cookies from a browser (Chrome, Firefox, Safari, Edge, Brave) |
+| YouTube Cookie File | — | Upload a Netscape `cookies.txt` as fallback |
 | Output Folder | `YouTube` | Vault folder for new notes (created automatically) |
 
 ---
 
 ## Updating the Container
 
-If you edit `backend/main.py`:
+After editing any backend files:
 
 ```bash
 docker compose up -d --build
 ```
+
+---
+
+## Adding Custom Prompts
+
+The backend uses a composable prompt system in `backend/prompts/`. Each prompt feature is a standalone Python module with three exports:
+
+| Export | Type | Purpose |
+|---|---|---|
+| `ROLE_PREAMBLE` | `str` | Added to the "You are ..." role line |
+| `JSON_KEYS` | `list[dict]` | Keys to request in Claude's JSON response |
+| `RULES` | `str` | Instructions for this feature's output |
+
+To add a new prompt feature:
+
+1. Create a new file in `backend/prompts/` (e.g., `action_items.py`)
+2. Define `ROLE_PREAMBLE`, `JSON_KEYS`, and `RULES`
+3. Register it in the `PROMPTS` dict in `backend/prompts/__init__.py`
+4. Add a corresponding `bool` flag to `TranscriptRequest` in `backend/models.py`
+5. Wire the flag in `main.py`'s `event_generator` (add to `features` list)
+6. Handle the new JSON key in `note.py`'s `build_obsidian_note()`
+
+Example prompt module:
+
+```python
+# backend/prompts/action_items.py
+
+ROLE_PREAMBLE = "task extraction specialist"
+
+JSON_KEYS = [
+    {
+        "key": "action_items",
+        "description": "A bulleted list of actionable takeaways from the video.",
+    },
+]
+
+RULES = """Rules for "action_items":
+- Extract concrete, actionable items mentioned in the video.
+- Each item should be a single clear sentence.
+- Order by importance, not by appearance in the video.
+- Limit to 10 items maximum."""
+```
+
+The `get_system_prompt(features)` function in `prompts/__init__.py` automatically composes the selected features into a single coherent system prompt with merged role descriptions, JSON keys, and rules.
 
 ---
 
@@ -187,8 +260,18 @@ Check your `ANTHROPIC_API_KEY` in `.env` is correct and has sufficient credits.
 ```
 youtube-to-obsidian/
 ├── backend/
-│   ├── main.py              # FastAPI app
-│   └── requirements.txt
+│   ├── main.py              # FastAPI routes (thin layer)
+│   ├── models.py            # Pydantic request/response models
+│   ├── youtube.py           # Video metadata + transcript fetching
+│   ├── note.py              # Obsidian note builder
+│   ├── claude.py            # Anthropic client + streaming
+│   ├── cookies.py           # Cookie file management
+│   ├── prompts/
+│   │   ├── __init__.py      # Prompt registry + composer
+│   │   ├── base.py          # Transcript + short summary
+│   │   └── extended.py      # Extended editorial summary
+│   ├── requirements.txt
+│   └── Dockerfile
 ├── obsidian-plugin/
 │   ├── src/
 │   │   └── main.ts          # Plugin source
