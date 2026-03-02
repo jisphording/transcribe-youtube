@@ -81,6 +81,10 @@ class YouTubeImportModal extends Modal {
   extendedSummaryCheckbox: HTMLInputElement;
   modelSelect: HTMLSelectElement;
   statusEl: HTMLElement;
+  detailEl: HTMLElement;
+  progressWrapper: HTMLElement;
+  progressBarOuter: HTMLElement;
+  progressBarInner: HTMLElement;
   importBtn: HTMLButtonElement;
 
   constructor(app: App, plugin: YTObsidianPlugin) {
@@ -160,11 +164,36 @@ class YouTubeImportModal extends Modal {
     const opusOpt = this.modelSelect.createEl("option", { text: "Opus (higher quality)", value: "claude-opus-4-6" });
     opusOpt.value = "claude-opus-4-6";
 
+    // Progress bar
+    const progressWrapper = contentEl.createDiv({ cls: "yt-obsidian-progress-wrapper" });
+    progressWrapper.style.marginTop = "12px";
+    progressWrapper.style.display = "none";
+
+    this.progressBarOuter = progressWrapper.createDiv({ cls: "yt-obsidian-progress-bar-outer" });
+    this.progressBarOuter.style.height = "4px";
+    this.progressBarOuter.style.borderRadius = "2px";
+    this.progressBarOuter.style.backgroundColor = "var(--background-modifier-border)";
+    this.progressBarOuter.style.overflow = "hidden";
+
+    this.progressBarInner = this.progressBarOuter.createDiv({ cls: "yt-obsidian-progress-bar-inner" });
+    this.progressBarInner.style.height = "100%";
+    this.progressBarInner.style.width = "0%";
+    this.progressBarInner.style.backgroundColor = "var(--interactive-accent)";
+    this.progressBarInner.style.transition = "width 0.3s ease";
+
+    this.progressWrapper = progressWrapper;
+
     // Status message
     this.statusEl = contentEl.createDiv({ cls: "yt-obsidian-status" });
     this.statusEl.style.minHeight = "24px";
     this.statusEl.style.marginTop = "8px";
     this.statusEl.style.fontSize = "13px";
+
+    // Detail line (token counts, elapsed time)
+    this.detailEl = contentEl.createDiv({ cls: "yt-obsidian-detail" });
+    this.detailEl.style.fontSize = "11px";
+    this.detailEl.style.color = "var(--text-muted)";
+    this.detailEl.style.minHeight = "16px";
 
     // Buttons
     const btnRow = contentEl.createDiv({ cls: "yt-obsidian-btn-row" });
@@ -236,6 +265,7 @@ class YouTubeImportModal extends Modal {
       const decoder = new TextDecoder();
       let buffer = "";
       let doneData: { filename: string; content: string } | null = null;
+      let costUsd: number | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -259,28 +289,47 @@ class YouTubeImportModal extends Modal {
 
           const stage = event.stage as string;
           const message = event.message as string;
+          const step = (event.step as number) || 0;
+          const totalSteps = (event.total_steps as number) || 4;
 
           switch (stage) {
             case "metadata":
-              this.setStatus(`⏳ ${message}`, "info");
+              this.setProgress(step, totalSteps, `⏳ ${message}`);
               break;
             case "metadata_done":
-              this.setStatus(`✓ ${message}`, "info");
+              this.setProgress(step, totalSteps, `✓ ${message}`);
               break;
             case "transcript":
-              this.setStatus(`⏳ ${message}`, "info");
+              this.setProgress(step, totalSteps, `⏳ ${message}`);
               break;
             case "transcript_done":
-              this.setStatus(`✓ ${message}`, "info");
+              this.setProgress(step, totalSteps, `✓ ${message}`);
+              this.setDetail(`${event.segments ?? "?"} segments, ${((event.transcript_chars as number) ?? 0).toLocaleString()} chars`);
               break;
             case "claude":
-              this.setStatus(`🤖 ${message}`, "info");
-              break;
             case "claude_extended":
-              this.setStatus(`🤖 ${message}`, "info");
+              this.setProgress(step, totalSteps, `🤖 ${message}`);
+              if (event.input_tokens || event.output_tokens) {
+                const inTok = ((event.input_tokens as number) ?? 0).toLocaleString();
+                const outTok = ((event.output_tokens as number) ?? 0).toLocaleString();
+                const elapsed = event.elapsed ? `${event.elapsed}s` : "";
+                this.setDetail(`Input: ${inTok} tokens · Output: ${outTok} tokens${elapsed ? ` · ${elapsed}` : ""}`);
+              }
+              break;
+            case "claude_done":
+              this.setProgress(step, totalSteps, `✓ ${message}`);
+              if (event.cost_usd != null) {
+                costUsd = event.cost_usd as number;
+              }
+              if (event.input_tokens || event.output_tokens) {
+                const inTok = ((event.input_tokens as number) ?? 0).toLocaleString();
+                const outTok = ((event.output_tokens as number) ?? 0).toLocaleString();
+                const costStr = costUsd != null ? ` · $${costUsd.toFixed(4)}` : "";
+                this.setDetail(`Total: ${inTok} input + ${outTok} output tokens${costStr}`);
+              }
               break;
             case "building":
-              this.setStatus(`💾 ${message}`, "info");
+              this.setProgress(step, totalSteps, `💾 ${message}`);
               break;
             case "done":
               doneData = {
@@ -304,13 +353,16 @@ class YouTubeImportModal extends Modal {
       );
 
       new Notice(`Created: ${file.path}`);
-      this.setStatus(`Done! Note saved as "${file.path}"`, "success");
+      this.progressBarInner.style.width = "100%";
+      this.setStatus(`✓ Done! Note saved as "${file.path}"`, "success");
+      this.setDetail(costUsd != null ? `Estimated cost: $${costUsd.toFixed(4)}` : "");
 
       await this.app.workspace.openLinkText(file.path, "", false);
-      setTimeout(() => this.close(), 1500);
     } catch (error) {
       console.error("[YT Obsidian]", error);
       this.setStatus(`❌ ${error.message}`, "error");
+      this.setDetail("");
+      this.progressWrapper.style.display = "none";
       this.importBtn.disabled = false;
       this.urlInput.disabled = false;
       this.extendedSummaryCheckbox.disabled = false;
@@ -321,6 +373,18 @@ class YouTubeImportModal extends Modal {
   setStatus(msg: string, type: "info" | "success" | "warning" | "error") {
     this.statusEl.setText(msg);
     this.statusEl.className = `yt-obsidian-status yt-obsidian-status--${type}`;
+  }
+
+  setProgress(step: number, totalSteps: number, msg: string) {
+    this.progressWrapper.style.display = "block";
+    const pct = Math.round((Math.max(step - 1, 0) / totalSteps) * 100);
+    this.progressBarInner.style.width = `${pct}%`;
+    this.statusEl.setText(msg);
+    this.statusEl.className = "yt-obsidian-status yt-obsidian-status--info";
+  }
+
+  setDetail(detail: string) {
+    this.detailEl.setText(detail);
   }
 
   onClose() {

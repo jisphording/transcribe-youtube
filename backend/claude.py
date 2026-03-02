@@ -1,7 +1,8 @@
 import re
 import json
 import os
-from typing import Callable
+import time
+from typing import Generator
 import anthropic
 
 
@@ -15,33 +16,60 @@ def stream_claude(
     model: str,
     system_prompt: str,
     user_message: str,
-    on_progress: Callable[[int], None] | None = None,
-) -> str:
-    """Stream a Claude completion and return the full response text.
+) -> Generator[dict, None, None]:
+    """Stream a Claude completion, yielding real-time progress dicts.
 
-    Args:
-        model: Model ID (must be in VALID_MODELS).
-        system_prompt: System prompt text.
-        user_message: User message text.
-        on_progress: Optional callback called with chars_generated count every ~100 tokens.
+    Yields dicts with type="progress" containing token/timing info,
+    and finally a dict with type="done" containing the full response.
     """
     validated_model = model if model in VALID_MODELS else DEFAULT_MODEL
 
     raw_response = ""
-    token_count = 0
+    output_tokens = 0
+    input_tokens = 0
+    start_time = time.time()
+
     with client.messages.stream(
         model=validated_model,
         max_tokens=128000,
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
     ) as stream:
-        for text in stream.text_stream:
-            raw_response += text
-            token_count += 1
-            if on_progress and token_count % 100 == 0:
-                on_progress(token_count * 4)
+        for event in stream:
+            if event.type == "message_start":
+                input_tokens = event.message.usage.input_tokens
+                yield {
+                    "type": "progress",
+                    "input_tokens": input_tokens,
+                    "output_tokens": 0,
+                    "elapsed": time.time() - start_time,
+                    "phase": "starting",
+                }
 
-    return raw_response
+            elif event.type == "content_block_delta":
+                text = event.delta.text
+                raw_response += text
+                output_tokens += 1  # each delta ≈ 1 token
+                if output_tokens % 20 == 0:
+                    yield {
+                        "type": "progress",
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "elapsed": time.time() - start_time,
+                        "phase": "generating",
+                    }
+
+            elif event.type == "message_delta":
+                if hasattr(event.usage, "output_tokens"):
+                    output_tokens = event.usage.output_tokens
+
+    yield {
+        "type": "done",
+        "response": raw_response,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "elapsed": time.time() - start_time,
+    }
 
 
 def parse_claude_response(raw_response: str) -> dict:
