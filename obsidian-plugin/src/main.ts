@@ -79,6 +79,7 @@ class YouTubeImportModal extends Modal {
   plugin: YTObsidianPlugin;
   urlInput: HTMLInputElement;
   extendedSummaryCheckbox: HTMLInputElement;
+  modelSelect: HTMLSelectElement;
   statusEl: HTMLElement;
   importBtn: HTMLButtonElement;
 
@@ -142,6 +143,23 @@ class YouTubeImportModal extends Modal {
     checkboxDesc.style.marginTop = "2px";
     checkboxDesc.style.marginBottom = "4px";
 
+    // Model selection
+    const modelWrapper = contentEl.createDiv({ cls: "yt-obsidian-model-wrapper" });
+    modelWrapper.style.marginTop = "12px";
+    modelWrapper.style.display = "flex";
+    modelWrapper.style.alignItems = "center";
+    modelWrapper.style.gap = "8px";
+
+    modelWrapper.createEl("label", { text: "Model:" }).style.fontSize = "14px";
+
+    this.modelSelect = modelWrapper.createEl("select", {
+      cls: "dropdown",
+    });
+    const sonnetOpt = this.modelSelect.createEl("option", { text: "Sonnet (faster)", value: "claude-sonnet-4-6" });
+    sonnetOpt.value = "claude-sonnet-4-6";
+    const opusOpt = this.modelSelect.createEl("option", { text: "Opus (higher quality)", value: "claude-opus-4-6" });
+    opusOpt.value = "claude-opus-4-6";
+
     // Status message
     this.statusEl = contentEl.createDiv({ cls: "yt-obsidian-status" });
     this.statusEl.style.minHeight = "24px";
@@ -182,6 +200,8 @@ class YouTubeImportModal extends Modal {
 
     this.importBtn.disabled = true;
     this.urlInput.disabled = true;
+    this.extendedSummaryCheckbox.disabled = true;
+    this.modelSelect.disabled = true;
     this.setStatus("⏳ Connecting to backend…", "info");
 
     try {
@@ -193,6 +213,7 @@ class YouTubeImportModal extends Modal {
       if (this.extendedSummaryCheckbox.checked) {
         body.extended_summary = true;
       }
+      body.model = this.modelSelect.value;
 
       const response = await fetch(`${apiUrl}/process`, {
         method: "POST",
@@ -292,6 +313,8 @@ class YouTubeImportModal extends Modal {
       this.setStatus(`❌ ${error.message}`, "error");
       this.importBtn.disabled = false;
       this.urlInput.disabled = false;
+      this.extendedSummaryCheckbox.disabled = false;
+      this.modelSelect.disabled = false;
     }
   }
 
