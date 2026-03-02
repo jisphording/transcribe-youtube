@@ -1,7 +1,8 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 youtube-transcript-api==0.6.2
-yt-dlp==2024.8.6
+yt-dlp>=2025.2.19
 anthropic==0.34.2
 httpx==0.27.2
 pydantic==2.8.2
+sse-starlette==2.1.0
