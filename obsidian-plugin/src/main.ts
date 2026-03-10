@@ -87,6 +87,7 @@ class YouTubeImportModal extends Modal {
   progressBarOuter: HTMLElement;
   progressBarInner: HTMLElement;
   importBtn: HTMLButtonElement;
+  skipDuplicateCheck = false;
 
   constructor(app: App, plugin: YTObsidianPlugin) {
     super(app);
@@ -118,6 +119,9 @@ class YouTubeImportModal extends Modal {
     // Allow hitting Enter to trigger import
     this.urlInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.startImport();
+    });
+    this.urlInput.addEventListener("input", () => {
+      this.skipDuplicateCheck = false;
     });
 
     // Mode toggle: Transcript / Extended Summary
@@ -235,6 +239,31 @@ class YouTubeImportModal extends Modal {
     setTimeout(() => this.urlInput.focus(), 50);
   }
 
+  extractVideoId(url: string): string | null {
+    const patterns = [
+      /[?&]v=([a-zA-Z0-9_-]{11})/,
+      /youtu\.be\/([a-zA-Z0-9_-]{11})/,
+      /embed\/([a-zA-Z0-9_-]{11})/,
+    ];
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
+  async findExistingNote(videoId: string): Promise<TFile | null> {
+    const folder = this.plugin.settings.outputFolder.trim();
+    const files = this.app.vault.getMarkdownFiles().filter((f) =>
+      !folder || f.path.startsWith(folder + "/")
+    );
+    for (const file of files) {
+      const content = await this.app.vault.read(file);
+      if (content.includes(videoId)) return file;
+    }
+    return null;
+  }
+
   async startImport() {
     const url = this.urlInput.value.trim();
     if (!url) {
@@ -246,6 +275,22 @@ class YouTubeImportModal extends Modal {
       this.setStatus("⚠️ That doesn't look like a YouTube URL.", "warning");
       return;
     }
+
+    if (!this.skipDuplicateCheck) {
+      const videoId = this.extractVideoId(url);
+      if (videoId) {
+        const existing = await this.findExistingNote(videoId);
+        if (existing) {
+          this.setStatus(
+            `⚠️ Already imported as "${existing.path}". Click Import again to overwrite.`,
+            "warning"
+          );
+          this.skipDuplicateCheck = true;
+          return;
+        }
+      }
+    }
+    this.skipDuplicateCheck = false;
 
     this.importBtn.disabled = true;
     this.urlInput.disabled = true;
