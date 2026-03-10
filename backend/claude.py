@@ -8,8 +8,15 @@ import anthropic
 
 client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-VALID_MODELS = {"claude-sonnet-4-6", "claude-opus-4-6"}
-DEFAULT_MODEL = "claude-sonnet-4-6"
+VALID_MODELS = {"claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6"}
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_EXTENDED_MODEL = "claude-sonnet-4-6"
+
+MODEL_MAX_OUTPUT_TOKENS = {
+    "claude-haiku-4-5-20251001": 8192,
+    "claude-sonnet-4-6": 128000,
+    "claude-opus-4-6": 128000,
+}
 
 
 def stream_claude(
@@ -29,9 +36,11 @@ def stream_claude(
     input_tokens = 0
     start_time = time.time()
 
+    max_tokens = MODEL_MAX_OUTPUT_TOKENS.get(validated_model, 8192)
+
     with client.messages.stream(
         model=validated_model,
-        max_tokens=128000,
+        max_tokens=max_tokens,
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
     ) as stream:
