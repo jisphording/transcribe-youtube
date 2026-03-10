@@ -6,7 +6,7 @@ from sse_starlette.sse import EventSourceResponse
 from models import TranscriptRequest, CookieUpload
 from youtube import extract_video_id, get_video_metadata, get_transcript, transcript_to_plain_text
 from note import build_obsidian_note
-from claude import stream_claude, parse_claude_response, VALID_MODELS, DEFAULT_MODEL
+from claude import stream_claude, parse_claude_response, VALID_MODELS, DEFAULT_MODEL, DEFAULT_EXTENDED_MODEL, MODEL_MAX_OUTPUT_TOKENS
 import time
 from cookies import has_cookies, save_cookies, delete_cookies
 from prompts import get_system_prompt
@@ -21,6 +21,58 @@ app.add_middleware(
 )
 
 
+# Chunked transcript processing (used when transcript exceeds Haiku's output limit)
+# Haiku max output ≈ 8192 tokens ≈ 32k chars; we trigger chunking well before that.
+_CHUNK_CHARS = 20_000        # target chars per chunk (input)
+_CHUNK_THRESHOLD_CHARS = 25_000  # trigger chunking above this raw transcript size
+
+_CHUNK_CLEAN_SYSTEM = """You are a transcript editor.
+You will receive a segment of a raw YouTube video transcript. Clean it and return a JSON object with exactly 2 keys:
+1. "heading": A short, descriptive title (3-6 words) for this segment's topic.
+2. "transcript": The cleaned transcript text for this segment.
+
+Rules for "transcript":
+- Remove ALL filler words: "um", "uh", "like", "you know", "sort of", "kind of", "basically", "literally", "actually", "right", "okay so", "so yeah", "I mean", etc.
+- Keep content close to original wording — do not paraphrase or rewrite sentences.
+- Preserve paragraph breaks for readability. Group related sentences together.
+- Do NOT add any content that wasn't in the original.
+
+Return ONLY the JSON object, no other text."""
+
+_CHUNK_SUMMARY_SYSTEM = """You are a transcript summarizer.
+You will receive the cleaned transcript of a YouTube video along with its title and channel.
+Return a JSON object with exactly 1 key:
+1. "summary": A concise 3-5 sentence summary of the video's main content and key takeaways.
+
+Return ONLY the JSON object, no other text."""
+
+
+def _split_transcript(text: str, chunk_size: int) -> list[str]:
+    if len(text) <= chunk_size:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        if end >= len(text):
+            chunks.append(text[start:].strip())
+            break
+        # Prefer paragraph break
+        para = text.rfind("\n\n", start + chunk_size // 2, end)
+        if para != -1:
+            end = para
+        else:
+            # Fall back to sentence boundary
+            for sep in (". ", "? ", "! "):
+                sent = text.rfind(sep, start + chunk_size // 2, end)
+                if sent != -1:
+                    end = sent + 1
+                    break
+        chunks.append(text[start:end].strip())
+        start = end
+    return [c for c in chunks if c.strip()]
+
+
 def _sse_event(stage: str, message: str, **extra) -> str:
     data = {"stage": stage, "message": message, **extra}
     return json.dumps(data)
@@ -28,8 +80,9 @@ def _sse_event(stage: str, message: str, **extra) -> str:
 
 # Pricing per million tokens (USD)
 MODEL_PRICING = {
-    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
-    "claude-opus-4-6":   {"input": 5.00, "output": 25.00},
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
+    "claude-sonnet-4-6":         {"input": 3.00, "output": 15.00},
+    "claude-opus-4-6":           {"input": 5.00, "output": 25.00},
 }
 
 
@@ -102,17 +155,116 @@ async def process_video(request: TranscriptRequest):
             if request.extended_summary:
                 features.append("extended")
 
-            system_prompt = get_system_prompt(features)
-            model = request.model if request.model in VALID_MODELS else DEFAULT_MODEL
+            if request.extended_summary:
+                model = request.extended_model if request.extended_model in VALID_MODELS else DEFAULT_EXTENDED_MODEL
+            else:
+                model = request.model if request.model in VALID_MODELS else DEFAULT_MODEL
             stage_label = "claude_extended" if request.extended_summary else "claude"
 
-            task_desc = "summary + extended summary + transcript" if request.extended_summary else "summary + transcript"
-            yield _sse_event(stage_label,
-                             "Step 3/{total} — Sending to Claude ({model})… Processing {task}".format(
-                                 total=total_steps, model=model.split("-")[-1].capitalize(), task=task_desc),
-                             step=3, total_steps=total_steps)
+            use_chunks = (
+                not request.extended_summary
+                and model == "claude-haiku-4-5-20251001"
+                and transcript_chars > _CHUNK_THRESHOLD_CHARS
+            )
 
-            user_message = f"""Video Title: {metadata['title']}
+            if use_chunks:
+                # ── Chunked path: clean each segment separately, then summarise ──
+                chunks = _split_transcript(raw_text, _CHUNK_CHARS)
+                n_chunks = len(chunks)
+                yield _sse_event(stage_label,
+                                 "Step 3/{total} — Transcript split into {n} chunks for Haiku…".format(
+                                     total=total_steps, n=n_chunks),
+                                 step=3, total_steps=total_steps)
+
+                cleaned_sections: list[str] = []
+                total_in_tokens = 0
+                total_out_tokens = 0
+                chunk_start_time = time.time()
+
+                for i, chunk in enumerate(chunks):
+                    yield _sse_event(stage_label,
+                                     "Step 3/{total} — Cleaning chunk {i}/{n}…".format(
+                                         total=total_steps, i=i + 1, n=n_chunks),
+                                     step=3, total_steps=total_steps)
+                    chunk_user = (
+                        f"Video: {metadata['title']} (segment {i + 1}/{n_chunks})\n\n"
+                        f"--- TRANSCRIPT SEGMENT ---\n{chunk}\n--- END SEGMENT ---"
+                    )
+                    raw_chunk = None
+                    try:
+                        for update in stream_claude(model, _CHUNK_CLEAN_SYSTEM, chunk_user):
+                            if update["type"] == "done":
+                                raw_chunk = update["response"]
+                                total_in_tokens += update["input_tokens"]
+                                total_out_tokens += update["output_tokens"]
+                    except Exception as e:
+                        yield _sse_event("error", f"Claude API error on chunk {i + 1}: {e}")
+                        return
+
+                    if raw_chunk is None:
+                        yield _sse_event("error", f"No response for chunk {i + 1}.")
+                        return
+                    try:
+                        chunk_result = parse_claude_response(raw_chunk)
+                        heading = chunk_result.get("heading", f"Part {i + 1}")
+                        chunk_text = chunk_result.get("transcript", "")
+                        cleaned_sections.append(f"## {heading}\n\n{chunk_text}")
+                    except Exception as e:
+                        yield _sse_event("error", f"Invalid JSON from Claude on chunk {i + 1}: {e}")
+                        return
+
+                # Summary pass
+                yield _sse_event(stage_label,
+                                 "Step 3/{total} — Generating summary…".format(total=total_steps),
+                                 step=3, total_steps=total_steps)
+                combined_cleaned = "\n\n".join(cleaned_sections)
+                summary_user = (
+                    f"Title: {metadata['title']}\nChannel: {metadata['channel']}\n\n"
+                    f"Transcript:\n{combined_cleaned[:40_000]}"
+                )
+                summary_raw = None
+                try:
+                    for update in stream_claude(model, _CHUNK_SUMMARY_SYSTEM, summary_user):
+                        if update["type"] == "done":
+                            summary_raw = update["response"]
+                            total_in_tokens += update["input_tokens"]
+                            total_out_tokens += update["output_tokens"]
+                except Exception as e:
+                    yield _sse_event("error", f"Claude API error on summary: {e}")
+                    return
+
+                elapsed_total = time.time() - chunk_start_time
+                cost = _estimate_cost(model, total_in_tokens, total_out_tokens)
+                yield _sse_event("claude_done",
+                                 "Step 3/{total} — Claude done! {in_tok} in → {out_tok} out ({elapsed})".format(
+                                     total=total_steps,
+                                     in_tok=_fmt_tokens(total_in_tokens),
+                                     out_tok=_fmt_tokens(total_out_tokens),
+                                     elapsed=_fmt_elapsed(elapsed_total)),
+                                 step=3, total_steps=total_steps,
+                                 input_tokens=total_in_tokens, output_tokens=total_out_tokens,
+                                 elapsed=round(elapsed_total, 1), cost_usd=round(cost, 4))
+
+                try:
+                    summary_result = parse_claude_response(summary_raw) if summary_raw else {}
+                except Exception:
+                    summary_result = {}
+
+                summary = summary_result.get("summary", "")
+                transcript_md = combined_cleaned
+                extended_summary = ""
+
+            else:
+                # ── Single-call path ──
+                system_prompt = get_system_prompt(features)
+
+                task_desc = "summary + extended summary + transcript" if request.extended_summary else "summary + transcript"
+                yield _sse_event(stage_label,
+                                 "Step 3/{total} — Sending to Claude ({model})… Processing {task}".format(
+                                     total=total_steps, model=model.split("-")[-1].capitalize(), task=task_desc),
+                                 step=3, total_steps=total_steps)
+
+                user_message = f"""Video Title: {metadata['title']}
 Channel: {metadata['channel']}
 Video duration: {metadata['duration']}
 Description excerpt: {metadata['description']}
@@ -124,61 +276,65 @@ Multi-speaker detected: {is_multi_speaker}
 
 Please process this transcript according to the instructions."""
 
-            raw_response = None
-            try:
-                for update in stream_claude(model, system_prompt, user_message):
-                    if update["type"] == "progress":
-                        elapsed = _fmt_elapsed(update["elapsed"])
-                        in_tok = _fmt_tokens(update["input_tokens"])
-                        out_tok = _fmt_tokens(update["output_tokens"])
-                        if update["phase"] == "starting":
-                            msg = "Step 3/{total} — Claude received {in_tok} input tokens, generating…".format(
-                                total=total_steps, in_tok=in_tok)
-                        else:
-                            msg = "Step 3/{total} — Claude generating… {out_tok} output tokens ({elapsed})".format(
-                                total=total_steps, out_tok=out_tok, elapsed=elapsed)
-                        yield _sse_event(stage_label, msg,
-                                         step=3, total_steps=total_steps,
-                                         input_tokens=update["input_tokens"],
-                                         output_tokens=update["output_tokens"],
-                                         elapsed=round(update["elapsed"], 1))
-                    elif update["type"] == "done":
-                        raw_response = update["response"]
-                        elapsed = _fmt_elapsed(update["elapsed"])
-                        in_tok = _fmt_tokens(update["input_tokens"])
-                        out_tok = _fmt_tokens(update["output_tokens"])
-                        cost = _estimate_cost(model, update["input_tokens"], update["output_tokens"])
-                        yield _sse_event("claude_done",
-                                         "Step 3/{total} — Claude done! {in_tok} in → {out_tok} out ({elapsed})".format(
-                                             total=total_steps, in_tok=in_tok, out_tok=out_tok, elapsed=elapsed),
-                                         step=3, total_steps=total_steps,
-                                         input_tokens=update["input_tokens"],
-                                         output_tokens=update["output_tokens"],
-                                         elapsed=round(update["elapsed"], 1),
-                                         cost_usd=round(cost, 4))
-            except Exception as e:
-                yield _sse_event("error", f"Claude API error: {e}")
-                return
+                raw_response = None
+                try:
+                    for update in stream_claude(model, system_prompt, user_message):
+                        if update["type"] == "progress":
+                            elapsed = _fmt_elapsed(update["elapsed"])
+                            in_tok = _fmt_tokens(update["input_tokens"])
+                            out_tok = _fmt_tokens(update["output_tokens"])
+                            if update["phase"] == "starting":
+                                msg = "Step 3/{total} — Claude received {in_tok} input tokens, generating…".format(
+                                    total=total_steps, in_tok=in_tok)
+                            else:
+                                msg = "Step 3/{total} — Claude generating… {out_tok} output tokens ({elapsed})".format(
+                                    total=total_steps, out_tok=out_tok, elapsed=elapsed)
+                            yield _sse_event(stage_label, msg,
+                                             step=3, total_steps=total_steps,
+                                             input_tokens=update["input_tokens"],
+                                             output_tokens=update["output_tokens"],
+                                             elapsed=round(update["elapsed"], 1))
+                        elif update["type"] == "done":
+                            raw_response = update["response"]
+                            elapsed = _fmt_elapsed(update["elapsed"])
+                            in_tok = _fmt_tokens(update["input_tokens"])
+                            out_tok = _fmt_tokens(update["output_tokens"])
+                            cost = _estimate_cost(model, update["input_tokens"], update["output_tokens"])
+                            yield _sse_event("claude_done",
+                                             "Step 3/{total} — Claude done! {in_tok} in → {out_tok} out ({elapsed})".format(
+                                                 total=total_steps, in_tok=in_tok, out_tok=out_tok, elapsed=elapsed),
+                                             step=3, total_steps=total_steps,
+                                             input_tokens=update["input_tokens"],
+                                             output_tokens=update["output_tokens"],
+                                             elapsed=round(update["elapsed"], 1),
+                                             cost_usd=round(cost, 4))
+                except Exception as e:
+                    yield _sse_event("error", f"Claude API error: {e}")
+                    return
 
-            if raw_response is None:
-                yield _sse_event("error", "Claude stream ended without a response.")
-                return
+                if raw_response is None:
+                    yield _sse_event("error", "Claude stream ended without a response.")
+                    return
 
-            try:
-                result = parse_claude_response(raw_response)
-            except Exception as e:
-                yield _sse_event("error", f"Claude returned invalid JSON: {e}")
-                return
+                try:
+                    result = parse_claude_response(raw_response)
+                except Exception as e:
+                    yield _sse_event("error", f"Claude returned invalid JSON: {e}")
+                    return
 
-            summary = result.get("summary", "")
-            extended_summary = result.get("extended_summary", "") if request.extended_summary else ""
-            transcript_md = result.get("transcript", "")
+                summary = result.get("summary", "")
+                extended_summary = result.get("extended_summary", "") if request.extended_summary else ""
+                transcript_md = result.get("transcript", "")
 
             # Step 4: Build note
             yield _sse_event("building",
                              "Step 4/{total} — Building Obsidian note…".format(total=total_steps),
                              step=4, total_steps=total_steps)
-            filename, note_content = build_obsidian_note(metadata, summary, transcript_md, extended_summary=extended_summary)
+            filename, note_content = build_obsidian_note(
+                metadata, summary, transcript_md,
+                extended_summary=extended_summary,
+                include_transcript=request.include_transcript,
+            )
 
             yield _sse_event("done", "Done!", filename=filename, content=note_content, metadata=metadata)
 
