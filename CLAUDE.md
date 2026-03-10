@@ -39,15 +39,22 @@ Each file has a single responsibility. Do not merge concerns across modules.
 - `models.py` contains only Pydantic models — no logic.
 - Prompt modules expose only `ROLE_PREAMBLE`, `JSON_KEYS`, and `RULES` — no functions.
 
-### Frontend (`obsidian-plugin/src/main.ts`)
+### Frontend (`obsidian-plugin/src/`)
 
-Single-file plugin with three classes separated by concern:
+Modular TypeScript plugin with one file per concern:
 
-| Class | Responsibility |
-|---|---|
-| `YTObsidianPlugin` | Plugin lifecycle, settings persistence, note creation |
-| `YouTubeImportModal` | Import UI, SSE stream consumption, progress display |
-| `YTObsidianSettingTab` | Settings UI, cookie management UI |
+| File | Responsibility | Depends on |
+|---|---|---|
+| `main.ts` | `YTObsidianPlugin` class — plugin lifecycle, settings persistence, note creation (entry point) | `settings`, `import-modal` |
+| `settings.ts` | `YTObsidianSettings` interface, `DEFAULT_SETTINGS`, `YTObsidianSettingTab` class (settings UI + cookie management) | `main` (type only) |
+| `import-modal.ts` | `YouTubeImportModal` class — import UI, request building, progress display | `main` (type only), `youtube-utils`, `sse-handler` |
+| `sse-handler.ts` | `processSSEStream()` — SSE stream parsing, event dispatch via callbacks | — |
+| `youtube-utils.ts` | `extractVideoId()`, `findExistingNote()` — stateless utility functions | — |
+
+**Rules:**
+- `sse-handler.ts` and `youtube-utils.ts` are pure modules with no plugin dependencies — they must not import from `main`, `settings`, or `import-modal`.
+- `settings.ts` and `import-modal.ts` import `main.ts` only as a type (`import type`) to avoid circular runtime dependencies.
+- SSE event stage handling lives in `sse-handler.ts`. When adding new SSE stages, update the switch statement there (not in `import-modal.ts`).
 
 ### Communication
 
@@ -151,6 +158,6 @@ Three-tier priority for YouTube authentication:
 ## Notes for Claude
 
 - When modifying the backend, keep modules independent. If a change touches `youtube.py`, it should NOT require changes to `claude.py` or `note.py` unless the interface contract changes.
-- When modifying SSE events, update both the backend emitter (`main.py`) and frontend consumer (`main.ts` switch statement) together.
+- When modifying SSE events, update the backend emitter (`main.py`) and the frontend consumer in `sse-handler.ts` together.
 - The prompt system is designed for extension. Prefer adding new prompt modules over modifying `base.py`.
 - Token counting in `claude.py` is approximate during streaming (1 delta ≈ 1 token) but corrected by `message_delta` at the end.
