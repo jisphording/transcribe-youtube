@@ -78,7 +78,8 @@ export default class YTObsidianPlugin extends Plugin {
 class YouTubeImportModal extends Modal {
   plugin: YTObsidianPlugin;
   urlInput: HTMLInputElement;
-  extendedSummaryCheckbox: HTMLInputElement;
+  importMode: "transcript" | "extended_summary" = "transcript";
+  modeToggleBtns: HTMLButtonElement[] = [];
   modelSelect: HTMLSelectElement;
   statusEl: HTMLElement;
   detailEl: HTMLElement;
@@ -119,33 +120,52 @@ class YouTubeImportModal extends Modal {
       if (e.key === "Enter") this.startImport();
     });
 
-    // Extended Summary checkbox
-    const checkboxWrapper = contentEl.createDiv({ cls: "yt-obsidian-checkbox-wrapper" });
-    checkboxWrapper.style.marginTop = "12px";
-    checkboxWrapper.style.display = "flex";
-    checkboxWrapper.style.alignItems = "center";
-    checkboxWrapper.style.gap = "8px";
+    // Mode toggle: Transcript / Extended Summary
+    const toggleWrapper = contentEl.createDiv({ cls: "yt-obsidian-toggle-wrapper" });
+    toggleWrapper.style.marginTop = "12px";
 
-    this.extendedSummaryCheckbox = checkboxWrapper.createEl("input", {
-      type: "checkbox",
+    const toggleLabel = toggleWrapper.createEl("div", { text: "Output mode" });
+    toggleLabel.style.fontSize = "12px";
+    toggleLabel.style.color = "var(--text-muted)";
+    toggleLabel.style.marginBottom = "6px";
+
+    const toggleRow = toggleWrapper.createDiv({ cls: "yt-obsidian-toggle-row" });
+    toggleRow.style.display = "flex";
+    toggleRow.style.gap = "0";
+    toggleRow.style.borderRadius = "6px";
+    toggleRow.style.overflow = "hidden";
+    toggleRow.style.border = "1px solid var(--background-modifier-border)";
+    toggleRow.style.width = "fit-content";
+
+    const modes: Array<{ value: "transcript" | "extended_summary"; label: string }> = [
+      { value: "transcript", label: "Transcript" },
+      { value: "extended_summary", label: "Extended Summary" },
+    ];
+
+    this.modeToggleBtns = modes.map(({ value, label }) => {
+      const btn = toggleRow.createEl("button", { text: label });
+      btn.style.padding = "5px 14px";
+      btn.style.fontSize = "13px";
+      btn.style.border = "none";
+      btn.style.cursor = "pointer";
+      btn.style.borderRadius = "0";
+      btn.style.transition = "background 0.15s, color 0.15s";
+      const setActive = (active: boolean) => {
+        btn.style.backgroundColor = active ? "var(--interactive-accent)" : "var(--background-primary)";
+        btn.style.color = active ? "var(--text-on-accent)" : "var(--text-normal)";
+      };
+      setActive(value === this.importMode);
+      btn.addEventListener("click", () => {
+        this.importMode = value;
+        this.modeToggleBtns.forEach((b, i) => {
+          const isActive = modes[i].value === value;
+          b.style.backgroundColor = isActive ? "var(--interactive-accent)" : "var(--background-primary)";
+          b.style.color = isActive ? "var(--text-on-accent)" : "var(--text-normal)";
+        });
+        this.modelSelect.value = value === "extended_summary" ? "claude-sonnet-4-6" : "claude-haiku-4-5-20251001";
+      });
+      return btn;
     });
-    this.extendedSummaryCheckbox.id = "yt-extended-summary";
-
-    const checkboxLabel = checkboxWrapper.createEl("label", {
-      text: "Create extended summary",
-    });
-    checkboxLabel.htmlFor = "yt-extended-summary";
-    checkboxLabel.style.cursor = "pointer";
-    checkboxLabel.style.fontSize = "14px";
-
-    const checkboxDesc = contentEl.createDiv({ cls: "yt-obsidian-checkbox-desc" });
-    checkboxDesc.setText(
-      "Adds a detailed topic-by-topic editorial summary between the summary and transcript. Increases processing time."
-    );
-    checkboxDesc.style.fontSize = "12px";
-    checkboxDesc.style.color = "var(--text-muted)";
-    checkboxDesc.style.marginTop = "2px";
-    checkboxDesc.style.marginBottom = "4px";
 
     // Model selection
     const modelWrapper = contentEl.createDiv({ cls: "yt-obsidian-model-wrapper" });
@@ -159,10 +179,10 @@ class YouTubeImportModal extends Modal {
     this.modelSelect = modelWrapper.createEl("select", {
       cls: "dropdown",
     });
-    const sonnetOpt = this.modelSelect.createEl("option", { text: "Sonnet (faster)", value: "claude-sonnet-4-6" });
-    sonnetOpt.value = "claude-sonnet-4-6";
-    const opusOpt = this.modelSelect.createEl("option", { text: "Opus (higher quality)", value: "claude-opus-4-6" });
-    opusOpt.value = "claude-opus-4-6";
+    this.modelSelect.createEl("option", { text: "Haiku (fastest, cheapest)", value: "claude-haiku-4-5-20251001" });
+    this.modelSelect.createEl("option", { text: "Sonnet (balanced)", value: "claude-sonnet-4-6" });
+    this.modelSelect.createEl("option", { text: "Opus (highest quality)", value: "claude-opus-4-6" });
+    this.modelSelect.value = "claude-haiku-4-5-20251001";
 
     // Progress bar
     const progressWrapper = contentEl.createDiv({ cls: "yt-obsidian-progress-wrapper" });
@@ -229,7 +249,7 @@ class YouTubeImportModal extends Modal {
 
     this.importBtn.disabled = true;
     this.urlInput.disabled = true;
-    this.extendedSummaryCheckbox.disabled = true;
+    this.modeToggleBtns.forEach((b) => (b.disabled = true));
     this.modelSelect.disabled = true;
     this.setStatus("⏳ Connecting to backend…", "info");
 
@@ -239,10 +259,13 @@ class YouTubeImportModal extends Modal {
       if (this.plugin.settings.cookieBrowser) {
         body.cookie_browser = this.plugin.settings.cookieBrowser;
       }
-      if (this.extendedSummaryCheckbox.checked) {
+      if (this.importMode === "extended_summary") {
         body.extended_summary = true;
+        body.include_transcript = false;
+        body.extended_model = this.modelSelect.value;
+      } else {
+        body.model = this.modelSelect.value;
       }
-      body.model = this.modelSelect.value;
 
       const response = await fetch(`${apiUrl}/process`, {
         method: "POST",
@@ -365,7 +388,7 @@ class YouTubeImportModal extends Modal {
       this.progressWrapper.style.display = "none";
       this.importBtn.disabled = false;
       this.urlInput.disabled = false;
-      this.extendedSummaryCheckbox.disabled = false;
+      this.modeToggleBtns.forEach((b) => (b.disabled = false));
       this.modelSelect.disabled = false;
     }
   }
