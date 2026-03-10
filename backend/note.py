@@ -2,7 +2,6 @@ import re
 
 
 def slugify(title: str) -> str:
-    """Convert title to all-lowercase-hyphen filename."""
     slug = title.lower()
     slug = re.sub(r"[^\w\s-]", "", slug)
     slug = re.sub(r"[\s_]+", "-", slug)
@@ -11,7 +10,18 @@ def slugify(title: str) -> str:
     return slug
 
 
-def build_obsidian_note(metadata: dict, summary: str, transcript_md: str, extended_summary: str = "") -> tuple[str, str]:
+def _demote_headings(text: str) -> str:
+    """Bump ## headings → ### so section content nests under the ## section header."""
+    return re.sub(r"^##(?!#)", "###", text, flags=re.MULTILINE)
+
+
+def build_obsidian_note(
+    metadata: dict,
+    summary: str,
+    transcript_md: str,
+    extended_summary: str = "",
+    include_transcript: bool = True,
+) -> tuple[str, str]:
     """Returns (filename, markdown_content)."""
     filename = slugify(metadata["title"]) + ".md"
 
@@ -37,8 +47,16 @@ tags:
     if extended_summary.strip():
         extended_summary_section = (
             "## Extended Summary\n\n"
-            + extended_summary.strip()
+            + _demote_headings(extended_summary.strip())
             + "\n\n---\n\n"
+        )
+
+    transcript_section = ""
+    if include_transcript and transcript_md.strip():
+        transcript_section = (
+            "## Transcript\n\n"
+            + _demote_headings(transcript_md.strip())
+            + "\n"
         )
 
     note = (
@@ -54,9 +72,7 @@ tags:
         + summary.strip()
         + "\n\n---\n\n"
         + extended_summary_section
-        + "## Transcript\n\n"
-        + transcript_md.strip()
-        + "\n"
+        + transcript_section
     )
 
     return filename, note
