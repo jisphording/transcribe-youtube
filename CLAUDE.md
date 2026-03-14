@@ -131,8 +131,10 @@ The `deploy` script reads `OBSIDIAN_PLUGINS_PATH` from `obsidian-plugin/.env` an
 
 ## Environment Variables
 
-- `backend/.env`: `ANTHROPIC_API_KEY` — required for Claude API
-- `obsidian-plugin/.env`: `OBSIDIAN_PLUGINS_PATH` — deploy target path
+Both `.env` files are gitignored. Copy the `.env.example` templates on first setup.
+
+- `backend/.env`: `ANTHROPIC_API_KEY` — required for Claude API. The container must be restarted (`docker compose up -d`) after changes.
+- `obsidian-plugin/.env`: `OBSIDIAN_PLUGINS_PATH` — primary vault deploy target. Additional vaults can be added as `OBSIDIAN_PLUGINS_PATH_2`, `_3`, etc. (each needs a matching deploy line in `package.json`).
 
 ## SSE Event Protocol
 

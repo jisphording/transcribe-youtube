@@ -102,14 +102,14 @@ cd youtube-to-obsidian
 ### 2. Configure your API key
 
 ```bash
-cp .env.example .env
-# Edit .env and add your Anthropic API key
+cp backend/.env.example backend/.env
+# Edit backend/.env and add your Anthropic API key
 ```
 
 ### 3. Start the backend with OrbStack
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
 OrbStack will build the container and start the FastAPI server at `http://localhost:8000`.
@@ -120,13 +120,27 @@ curl http://localhost:8000/health
 # → {"status":"ok"}
 ```
 
+> **Note:** If you edit `backend/.env` after the container is already running, you must restart it for changes to take effect:
+> ```bash
+> docker compose up -d
+> ```
+
 ### 4. Auto-start on login (optional but recommended)
 
 In OrbStack's menu bar app → Container settings → enable "Start on login" for `yt-obsidian-api`.
 
 Or use a launchd plist — OrbStack handles this automatically if you enable it in the UI.
 
-### 5. Build the Obsidian plugin
+### 5. Configure plugin deployment
+
+```bash
+cp obsidian-plugin/.env.example obsidian-plugin/.env
+# Edit obsidian-plugin/.env and set your vault path(s)
+```
+
+Set `OBSIDIAN_PLUGINS_PATH` to your vault's plugin directory. To deploy to multiple vaults, add `OBSIDIAN_PLUGINS_PATH_2`, `_3`, etc. and mirror the deploy command in `package.json` for each additional path.
+
+### 6. Build and deploy the Obsidian plugin
 
 ```bash
 cd obsidian-plugin
@@ -134,18 +148,12 @@ npm install
 npm run build
 ```
 
-This produces a `main.js` file.
+This type-checks, bundles `main.js`, and copies `main.js` + `manifest.json` to the vault path(s) configured in step 5.
 
-### 6. Install the plugin into Obsidian
+### 7. Enable the plugin in Obsidian
 
-1. Open your vault in Finder
-2. Navigate to `.obsidian/plugins/`
-3. Create a folder: `youtube-to-obsidian`
-4. Copy these three files into it:
-   - `obsidian-plugin/main.js`
-   - `obsidian-plugin/manifest.json`
-5. In Obsidian: **Settings → Community Plugins → Reload plugins**
-6. Enable **YouTube to Obsidian**
+1. In Obsidian: **Settings → Community Plugins → Reload plugins**
+2. Enable **YouTube to Obsidian**
 
 ---
 
@@ -271,6 +279,7 @@ youtube-to-obsidian/
 │   │   ├── base.py          # Transcript + short summary
 │   │   └── extended.py      # Extended editorial summary
 │   ├── requirements.txt
+│   ├── .env.example         # Template for API key
 │   └── Dockerfile
 ├── obsidian-plugin/
 │   ├── src/
@@ -278,8 +287,8 @@ youtube-to-obsidian/
 │   ├── manifest.json
 │   ├── package.json
 │   ├── tsconfig.json
+│   ├── .env.example         # Template for vault path(s)
 │   └── esbuild.config.mjs
 ├── docker-compose.yml
-├── .env.example
 └── README.md
 ```
