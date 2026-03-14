@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production && npm run deploy",
-    "deploy": "source .env && mkdir -p \"$OBSIDIAN_PLUGINS_PATH\" && cp main.js manifest.json \"$OBSIDIAN_PLUGINS_PATH/\""
+    "deploy": "bash deploy.sh"
   },
   "devDependencies": {
     "@types/node": "^16.11.6",
