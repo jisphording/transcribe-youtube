@@ -15,6 +15,8 @@ export class YouTubeImportModal extends Modal {
     progressBarOuter: HTMLElement;
     progressBarInner: HTMLElement;
     importBtn: HTMLButtonElement;
+    cancelBtn: HTMLButtonElement;
+    btnRow: HTMLElement;
     skipDuplicateCheck = false;
 
     constructor(app: App, plugin: YTObsidianPlugin) {
@@ -147,16 +149,16 @@ export class YouTubeImportModal extends Modal {
         this.detailEl.style.minHeight = "16px";
 
         // Buttons
-        const btnRow = contentEl.createDiv({ cls: "yt-obsidian-btn-row" });
-        btnRow.style.display = "flex";
-        btnRow.style.justifyContent = "flex-end";
-        btnRow.style.gap = "8px";
-        btnRow.style.marginTop = "16px";
+        this.btnRow = contentEl.createDiv({ cls: "yt-obsidian-btn-row" });
+        this.btnRow.style.display = "flex";
+        this.btnRow.style.justifyContent = "flex-end";
+        this.btnRow.style.gap = "8px";
+        this.btnRow.style.marginTop = "16px";
 
-        const cancelBtn = btnRow.createEl("button", { text: "Cancel" });
-        cancelBtn.addEventListener("click", () => this.close());
+        this.cancelBtn = this.btnRow.createEl("button", { text: "Cancel" });
+        this.cancelBtn.addEventListener("click", () => this.close());
 
-        this.importBtn = btnRow.createEl("button", {
+        this.importBtn = this.btnRow.createEl("button", {
             text: "Import",
             cls: "mod-cta",
         });
@@ -243,6 +245,10 @@ export class YouTubeImportModal extends Modal {
             this.setDetail(result.costUsd != null ? `Estimated cost: $${result.costUsd.toFixed(4)}` : "");
 
             await this.app.workspace.openLinkText(file.path, "", false);
+
+            this.btnRow.empty();
+            const closeBtn = this.btnRow.createEl("button", { text: "Close", cls: "mod-cta" });
+            closeBtn.addEventListener("click", () => this.close());
         } catch (error) {
             console.error("[YT Obsidian]", error);
             this.setStatus(`\u274C ${error.message}`, "error");
