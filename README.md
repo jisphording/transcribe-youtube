@@ -3,14 +3,16 @@
 Import any YouTube video as a clean, structured Obsidian note — complete with metadata, Claude-generated summary, and a cleaned transcript organized into chapters.
 
 ```
-YouTube URL  →  [OrbStack Container]  →  Claude API  →  Obsidian Note
+YouTube URL  →  [native Python backend on macOS]  →  Claude API  →  Obsidian Note
 ```
+
+The backend runs as a native macOS launchd agent (no Docker, no OrbStack) and auto-starts on login. Python is managed by [`uv`](https://docs.astral.sh/uv/) so there's no global pip/pyenv mess.
 
 ---
 
 ## What You Get
 
-For each video, a new `.md` note is created in your vault like this:
+For each video, a new `.md` note is created in your vault:
 
 ```markdown
 ---
@@ -38,257 +40,316 @@ tags:
 
 ## Summary
 
-A 3-5 sentence summary of the key takeaways...
+A 3–5 sentence summary of the key takeaways…
 
 ---
 
 ## Extended Summary  ← (optional, when enabled)
 
 ### Topic One: The Core Argument
-
-Several paragraphs of synthesized editorial prose covering this topic...
+Several paragraphs of synthesized editorial prose…
 
 ### Topic Two: Practical Applications
-
-More prose...
+More prose…
 
 ---
 
 ## Transcript
 
 ## Introduction
-
-Cleaned transcript text without filler words, broken into chapters...
-
-## Chapter Two: The Core Concept
-
-More text...
+Cleaned transcript text without filler words, broken into chapters…
 ```
 
 ---
 
 ## Features
 
-### Model Selection
-Choose between **Sonnet** (faster, cheaper) and **Opus** (higher quality) directly in the import dialog. Defaults to Sonnet.
-
-### Extended Summary
-Check **"Create extended summary"** in the import dialog to add a comprehensive, topic-by-topic editorial rewrite between the summary and transcript. This reads like a standalone document written for a professional audience — useful for long conversations where you want a condensed but thorough version without watching the whole video.
-
-### Cookie Support
-Handle age-restricted or region-locked videos by providing YouTube cookies via browser extraction or a `cookies.txt` file upload.
+- **Model selection** — Haiku (fastest), Sonnet (balanced), or Opus (highest quality), picked per-import.
+- **Extended summary** — a topic-by-topic editorial rewrite that reads like a standalone piece.
+- **Cookie support** — Safari (default) / Chrome / Firefox / Edge / Brave via automatic browser extraction, with a `cookies.txt` upload fallback. Handles age-restricted and region-locked videos.
+- **Duplicate detection** — warns you if a note for the same video already exists in your vault.
+- **Auto-start** — backend runs as a launchd agent from the moment you log in.
 
 ---
 
-## Prerequisites
+## Requirements
 
-- [OrbStack](https://orbstack.dev) installed on your Mac
-- [Node.js](https://nodejs.org) (for building the Obsidian plugin)
+- macOS (Apple Silicon or Intel)
+- [Homebrew](https://brew.sh)
+- [Node.js](https://nodejs.org) (only needed for building the Obsidian plugin)
 - An [Anthropic API key](https://console.anthropic.com)
 
+You do **not** need a pre-installed Python — `uv` installs the right version (3.12) into its own cache.
+
 ---
 
-## Setup
+## One-shot install (macOS)
 
-### 1. Clone / copy this project
+### 1. Install the CLI prerequisites
 
 ```bash
-# Place the project somewhere sensible
-cd ~/Developer
-# (copy or clone the project here)
-cd youtube-to-obsidian
+brew install uv deno
 ```
 
-### 2. Configure your API key
+**Raycast users** — save this as a "Run Shell Command" snippet for one-click setup:
 
 ```bash
+brew install uv deno && open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+```
+
+- `uv` — Python version + package manager (replaces `pip`/`pyenv`/`venv`).
+- `deno` — JavaScript runtime that `yt-dlp` uses to compute YouTube's "PO tokens". Without it, yt-dlp gets bot-checked on most videos.
+
+### 2. Clone and configure
+
+```bash
+cd ~/Developer                                # or wherever you keep projects
+git clone <this-repo> transcribe-youtube
+cd transcribe-youtube
+
 cp backend/.env.example backend/.env
-# Edit backend/.env and add your Anthropic API key
+# open backend/.env and paste your ANTHROPIC_API_KEY
 ```
 
-### 3. Start the backend with OrbStack
+### 3. Install the backend as a launchd agent
 
 ```bash
-docker compose up -d --build
+cd backend
+./scripts/install.sh
 ```
 
-OrbStack will build the container and start the FastAPI server at `http://localhost:8000`.
+This script is idempotent and does:
 
-To verify it's running:
+1. Verifies `uv`, `deno`, and `brew` are available.
+2. Runs `uv sync` — creates `backend/.venv/` with Python 3.12 and all pinned deps. Generates `uv.lock`.
+3. Renders `com.johannes.yt-obsidian.plist.template` with your absolute paths and installs it to `~/Library/LaunchAgents/`.
+4. `launchctl load`s the agent. Uvicorn starts on port 8000 immediately and on every subsequent login.
+5. Prints the resolved Python path you'll need for Safari (see next step) and offers to open System Settings.
+
+Verify:
+
 ```bash
 curl http://localhost:8000/health
 # → {"status":"ok"}
 ```
 
-> **Note:** If you edit `backend/.env` after the container is already running, you must restart it for changes to take effect:
-> ```bash
-> docker compose up -d
-> ```
+### 4. Grant Safari cookies access (recommended, one-time)
 
-### 4. Auto-start on login (optional but recommended)
+Safari stores its cookies at `~/Library/Cookies/Cookies.binarycookies`, which macOS protects under TCC. For `yt-dlp` to read them, the Python binary launchd runs needs **Full Disk Access**.
 
-In OrbStack's menu bar app → Container settings → enable "Start on login" for `yt-obsidian-api`.
+1. `./scripts/install.sh` printed the binary path — it looks like
+   `~/.local/share/uv/python/cpython-3.12.x-macos-*/bin/python3.12` (the actual target of the `.venv` symlink).
+2. **System Settings → Privacy & Security → Full Disk Access**
+3. Click **+**, press **⌘⇧G**, paste the path, **Open**, then toggle it **on**.
+4. Restart the backend so the new permission applies:
+   ```bash
+   ./scripts/stop.sh && ./scripts/start.sh
+   ```
+5. Verify:
+   ```bash
+   ./scripts/check.sh --browser safari
+   ```
 
-Or use a launchd plist — OrbStack handles this automatically if you enable it in the UI.
+Don't want to grant FDA? Skip this step. The plugin will fall back to the `cookies.txt` you upload via the plugin settings. You can also switch to Firefox in the plugin settings — Firefox's cookie DB isn't TCC-protected.
 
-### 5. Configure plugin deployment
+### 5. Build and deploy the Obsidian plugin
 
 ```bash
-cp obsidian-plugin/.env.example obsidian-plugin/.env
-# Edit obsidian-plugin/.env and set your vault path(s)
-```
+cd ../obsidian-plugin
+cp .env.example .env
+# edit .env: OBSIDIAN_PLUGINS_PATH=<your vault>/.obsidian/plugins/youtube-to-obsidian
+# (add _2, _3, … for more vaults)
 
-Set `OBSIDIAN_PLUGINS_PATH` to your vault's plugin directory. To deploy to multiple vaults, add `OBSIDIAN_PLUGINS_PATH_2`, `_3`, etc. and mirror the deploy command in `package.json` for each additional path.
-
-### 6. Build and deploy the Obsidian plugin
-
-```bash
-cd obsidian-plugin
 npm install
 npm run build
 ```
 
-This type-checks, bundles `main.js`, and copies `main.js` + `manifest.json` to the vault path(s) configured in step 5.
-
-### 7. Enable the plugin in Obsidian
-
-1. In Obsidian: **Settings → Community Plugins → Reload plugins**
-2. Enable **YouTube to Obsidian**
+In Obsidian: **Settings → Community Plugins → Reload plugins**, then enable **YouTube to Obsidian**.
 
 ---
 
-## Usage
+## Using it
 
-### Option A — Ribbon icon
-Click the YouTube icon in the left sidebar ribbon.
+### Trigger the import
+- Click the YouTube icon in the left ribbon, **or**
+- `Cmd+P` → **Import YouTube Video as Note**
 
-### Option B — Command palette
-`Cmd+P` → **Import YouTube Video as Note**
+### In the dialog
+1. Paste a YouTube URL
+2. Pick Transcript or Extended Summary mode
+3. Pick a model
+4. **Import** (or press Enter)
 
-### Then:
-1. Paste your YouTube URL
-2. Select a model (Sonnet or Opus)
-3. Optionally check **"Create extended summary"**
-4. Hit **Import** (or press Enter)
-5. Wait ~15–30 seconds (depends on video length and model choice)
-6. The new note opens automatically in your vault
+The new note opens automatically. Videos over ~90 minutes start getting unreliable (YouTube rate-limits, transcripts truncate); Sonnet or Opus handles long videos better than Haiku.
 
-With very long videos above 90 minutes the reliability starts to drop.
-
----
-
-## Plugin Settings
-
-Go to **Settings → YouTube to Obsidian**:
+### Plugin settings
 
 | Setting | Default | Description |
 |---|---|---|
-| Backend API URL | `http://localhost:8000` | Where your Python server runs |
-| Browser for Cookies | None | Extract YouTube cookies from a browser (Chrome, Firefox, Safari, Edge, Brave) |
-| YouTube Cookie File | — | Upload a Netscape `cookies.txt` as fallback |
-| Output Folder | `YouTube` | Vault folder for new notes (created automatically) |
+| Backend API URL | `http://localhost:8000` | Where the Python server listens |
+| Browser for Cookies | **Safari** | Auto-extract YouTube cookies; falls back to cookies.txt if unreadable |
+| YouTube Cookie File | — | Netscape `cookies.txt` upload for when the browser path isn't available |
+| Output Folder | `YouTube` | Vault folder for new notes (auto-created) |
 
 ---
 
-## Updating the Container
+## Daily operations
 
-After editing any backend files:
+From `backend/`:
+
+| Command | What it does |
+|---|---|
+| `./scripts/start.sh` | `launchctl load` the agent; waits for `/health` |
+| `./scripts/stop.sh` | `launchctl unload` the agent |
+| `./scripts/logs.sh` | tail `~/Library/Logs/yt-obsidian/{stdout,stderr}.log` |
+| `./scripts/check.sh` | run the full diagnostic — agent state, Python binary, deno, cookie readability, yt-dlp end-to-end |
+| `./scripts/check.sh --browser safari` | as above, forcing yt-dlp to use Safari cookies |
+| `./scripts/update.sh` | `git pull` + `uv sync` from the lockfile + restart the backend |
+
+Changed `backend/.env` (e.g. new API key)? Restart the backend:
+```bash
+./scripts/stop.sh && ./scripts/start.sh
+```
+
+Changed plugin TypeScript? Rebuild:
+```bash
+cd obsidian-plugin && npm run build
+```
+Then in Obsidian: **Settings → Community Plugins → Reload plugins**.
+
+---
+
+## Uninstall
 
 ```bash
-docker compose up -d --build
+cd backend
+./scripts/stop.sh
+rm "$HOME/Library/LaunchAgents/com.johannes.yt-obsidian.plist"
+rm -rf .venv
+rm -rf "$HOME/Library/Logs/yt-obsidian"
 ```
 
 ---
 
-## Adding Custom Prompts
+## Why `uv`?
 
-The backend uses a composable prompt system in `backend/prompts/`. Each prompt feature is a standalone Python module with three exports:
+Python environments age badly — `pip install` into the system Python is how `/usr/bin/python3` ends up with conflicting versions of `httpx` from six projects. `uv` fixes this:
 
-| Export | Type | Purpose |
-|---|---|---|
-| `ROLE_PREAMBLE` | `str` | Added to the "You are ..." role line |
-| `JSON_KEYS` | `list[dict]` | Keys to request in Claude's JSON response |
-| `RULES` | `str` | Instructions for this feature's output |
+- **Per-project isolation.** `backend/.venv` is self-contained. Delete it, run `uv sync`, you're back where you were.
+- **Python version pinned.** `.python-version` says `3.12`. `uv` downloads that exact version into its cache if you don't have it. No Homebrew Python / Xcode Python / pyenv confusion.
+- **Lockfile is the source of truth.** `uv.lock` records the exact resolved tree. When you move to a new machine, `uv sync` reproduces it bit-for-bit — which is exactly what prevented this project from working after moving vaults (a floating `yt-dlp>=2025.2.19` upgraded silently and started requiring a JS runtime).
+- **One tool, not three.** No separate pyenv + pipx + poetry stack.
 
-To add a new prompt feature:
-
-1. Create a new file in `backend/prompts/` (e.g., `action_items.py`)
-2. Define `ROLE_PREAMBLE`, `JSON_KEYS`, and `RULES`
-3. Register it in the `PROMPTS` dict in `backend/prompts/__init__.py`
-4. Add a corresponding `bool` flag to `TranscriptRequest` in `backend/models.py`
-5. Wire the flag in `main.py`'s `event_generator` (add to `features` list)
-6. Handle the new JSON key in `note.py`'s `build_obsidian_note()`
-
-Example prompt module:
-
-```python
-# backend/prompts/action_items.py
-
-ROLE_PREAMBLE = "task extraction specialist"
-
-JSON_KEYS = [
-    {
-        "key": "action_items",
-        "description": "A bulleted list of actionable takeaways from the video.",
-    },
-]
-
-RULES = """Rules for "action_items":
-- Extract concrete, actionable items mentioned in the video.
-- Each item should be a single clear sentence.
-- Order by importance, not by appearance in the video.
-- Limit to 10 items maximum."""
-```
-
-The `get_system_prompt(features)` function in `prompts/__init__.py` automatically composes the selected features into a single coherent system prompt with merged role descriptions, JSON keys, and rules.
+If `uv` ever goes away, falling back is ten minutes of work: `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r <(uv export)`.
 
 ---
 
 ## Troubleshooting
 
-**"No transcript available"**
-The video may have disabled captions, or only has auto-generated captions in a non-English language. Try a different video to confirm the setup works.
+**`./scripts/check.sh` says Safari is `BLOCKED by TCC`.**
+Full Disk Access isn't granted to the Python binary launchd is using. Re-read step 4 above. The path printed by `scripts/check.sh` is the one that needs the permission — granting FDA to Terminal or iTerm does **not** help here because launchd runs the agent directly.
 
-**Container not reachable**
+**I granted FDA, still blocked.**
+Probably granted to a symlink or the wrong binary. `scripts/check.sh` prints the resolved path (`resolved to: /Users/…/cpython-3.12.x-macos-*/bin/python3.12`). Remove everything under FDA labeled `python*` and re-add that exact path. Restart the backend.
+
+**Existing `data.json` still says `cookieBrowser: ""`.**
+The Safari default only applies to fresh plugin installs. Open **Settings → YouTube to Obsidian** and change the dropdown to Safari, or edit `data.json` directly.
+
+**`yt-dlp` complains about "No supported JavaScript runtime".**
+`deno` isn't in the agent's PATH. The plist sets `PATH=/opt/homebrew/bin:/usr/local/bin:…` which picks up brew on Apple Silicon and Intel. If brew is somewhere else, edit `com.johannes.yt-obsidian.plist.template`'s `EnvironmentVariables` block and reinstall.
+
+**Video fails with 429 / "Sign in to confirm you're not a bot".**
+1. Run `./scripts/check.sh` to confirm cookies are being read.
+2. If cookies are fine but you still fail, your cookie file is probably only signed-out 3P cookies. Make sure Safari is currently signed into youtube.com; the browser extraction will then include the full 1P session.
+3. Try a different video — some private / age-gated / members-only videos require proper sign-in even with cookies.
+
+**Backend unreachable after update.**
 ```bash
-docker compose ps           # check it's running
-docker compose logs -f      # watch logs
+./scripts/logs.sh -n 50
 ```
+Common cause: `uv sync` broke because a pin is unavailable. Roll back `pyproject.toml`/`uv.lock` with `git checkout` and rerun `./scripts/update.sh`.
 
-**Plugin not showing up**
-Make sure you copied both `main.js` AND `manifest.json` into the plugin folder, then reloaded plugins in Obsidian settings.
-
-**Claude returns garbled output**
-Check your `ANTHROPIC_API_KEY` in `.env` is correct and has sufficient credits.
+**I still have the old Docker setup.**
+`Dockerfile` and `docker-compose.yml` remain in the repo as a fallback. They are no longer the recommended path — the native agent is simpler and avoids the deno-in-container headache. To delete: `rm backend/Dockerfile docker-compose.yml`.
 
 ---
 
-## Project Structure
+## Adding custom prompts
+
+The backend uses a composable prompt system in `backend/prompts/`. Each feature module exports:
+
+| Export | Type | Purpose |
+|---|---|---|
+| `ROLE_PREAMBLE` | `str` | Added to the "You are …" role line |
+| `JSON_KEYS` | `list[dict]` | Keys to request in Claude's JSON response |
+| `RULES` | `str` | Instructions for this feature's output |
+
+To add a feature:
+
+1. Create `backend/prompts/your_feature.py` with the three exports.
+2. Register it in the `PROMPTS` dict in `backend/prompts/__init__.py`.
+3. Add a `bool` flag to `TranscriptRequest` in `backend/models.py`.
+4. Wire the flag in `main.py`'s `event_generator` (append to `features` list).
+5. Extend `build_obsidian_note()` in `note.py` to render the new JSON key.
+
+Example:
+
+```python
+# backend/prompts/action_items.py
+ROLE_PREAMBLE = "task extraction specialist"
+
+JSON_KEYS = [
+    {"key": "action_items",
+     "description": "A bulleted list of actionable takeaways from the video."},
+]
+
+RULES = """Rules for "action_items":
+- Extract concrete, actionable items mentioned in the video.
+- Each item is a single clear sentence.
+- Order by importance, not by appearance.
+- Limit to 10 items maximum."""
+```
+
+---
+
+## Project layout
 
 ```
-youtube-to-obsidian/
+transcribe-youtube/
 ├── backend/
-│   ├── main.py              # FastAPI routes (thin layer)
+│   ├── main.py              # FastAPI routes + SSE pipeline
 │   ├── models.py            # Pydantic request/response models
-│   ├── youtube.py           # Video metadata + transcript fetching
-│   ├── note.py              # Obsidian note builder
-│   ├── claude.py            # Anthropic client + streaming
-│   ├── cookies.py           # Cookie file management
-│   ├── prompts/
-│   │   ├── __init__.py      # Prompt registry + composer
-│   │   ├── base.py          # Transcript + short summary
-│   │   └── extended.py      # Extended editorial summary
-│   ├── requirements.txt
-│   ├── .env.example         # Template for API key
-│   └── Dockerfile
+│   ├── youtube.py           # yt-dlp + transcript fetching + cookie logic
+│   ├── note.py              # Obsidian markdown assembly
+│   ├── claude.py            # Anthropic streaming client
+│   ├── cookies.py           # cookies.txt persistence
+│   ├── prompts/             # composable prompt modules
+│   ├── pyproject.toml       # deps (uv reads this)
+│   ├── uv.lock              # committed lockfile
+│   ├── .python-version      # pins Python 3.12
+│   ├── .env.example
+│   ├── com.johannes.yt-obsidian.plist.template
+│   ├── scripts/
+│   │   ├── install.sh
+│   │   ├── start.sh
+│   │   ├── stop.sh
+│   │   ├── logs.sh
+│   │   ├── update.sh
+│   │   └── check.sh
+│   ├── Dockerfile           # legacy; not used by the native flow
+│   └── requirements.txt     # legacy; replaced by pyproject.toml
 ├── obsidian-plugin/
 │   ├── src/
-│   │   └── main.ts          # Plugin source
+│   │   ├── main.ts
+│   │   ├── settings.ts
+│   │   ├── import-modal.ts
+│   │   ├── sse-handler.ts
+│   │   └── youtube-utils.ts
 │   ├── manifest.json
 │   ├── package.json
+│   ├── esbuild.config.mjs
 │   ├── tsconfig.json
-│   ├── .env.example         # Template for vault path(s)
-│   └── esbuild.config.mjs
-├── docker-compose.yml
+│   └── .env.example
+├── docker-compose.yml       # legacy
 └── README.md
 ```

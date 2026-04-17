@@ -9,4 +9,4 @@ services:
     restart: unless-stopped
     volumes:
       # Mount backend source for live reload during development
-      - ./backend:/app
+      - ./backend:/app:delegated

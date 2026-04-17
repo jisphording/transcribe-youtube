@@ -204,10 +204,7 @@ export class YouTubeImportModal extends Modal {
 
         try {
             const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
-            const body: Record<string, string | boolean> = { url };
-            if (this.plugin.settings.cookieBrowser) {
-                body.cookie_browser = this.plugin.settings.cookieBrowser;
-            }
+            const body: Record<string, string | boolean> = { url, cookie_browser: "safari" };
             if (this.importMode === "extended_summary") {
                 body.extended_summary = true;
                 body.include_transcript = false;

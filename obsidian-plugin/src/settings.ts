@@ -6,21 +6,15 @@ import {
 } from "obsidian";
 import type YTObsidianPlugin from "./main";
 
-// ─── Settings ────────────────────────────────────────────────────────────────
-
 export interface YTObsidianSettings {
     apiUrl: string;
     outputFolder: string;
-    cookieBrowser: string;
 }
 
 export const DEFAULT_SETTINGS: YTObsidianSettings = {
     apiUrl: "http://localhost:8000",
     outputFolder: "YouTube",
-    cookieBrowser: "",
 };
-
-// ─── Settings Tab ─────────────────────────────────────────────────────────────
 
 export class YTObsidianSettingTab extends PluginSettingTab {
     plugin: YTObsidianPlugin;
@@ -33,11 +27,11 @@ export class YTObsidianSettingTab extends PluginSettingTab {
     display(): void {
         const { containerEl } = this;
         containerEl.empty();
-        containerEl.createEl("h2", { text: "YouTube to Obsidian Settings" });
+        containerEl.createEl("h2", { text: "YouTube to Obsidian" });
 
         new Setting(containerEl)
             .setName("Backend API URL")
-            .setDesc("URL of your local Python backend (default: http://localhost:8000)")
+            .setDesc("URL of the local Python backend. Usually the default.")
             .addText((text) =>
                 text
                     .setPlaceholder("http://localhost:8000")
@@ -49,31 +43,22 @@ export class YTObsidianSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName("Browser for Cookies")
-            .setDesc(
-                "Extract cookies directly from a browser where you're logged into YouTube. Fixes 'Sign in to confirm you're not a bot' errors."
-            )
-            .addDropdown((dropdown) =>
-                dropdown
-                    .addOptions({
-                        "": "None (disabled)",
-                        chrome: "Chrome",
-                        firefox: "Firefox",
-                        safari: "Safari",
-                        edge: "Edge",
-                        brave: "Brave",
-                    })
-                    .setValue(this.plugin.settings.cookieBrowser)
+            .setName("Output Folder")
+            .setDesc("Vault folder where notes will be saved (created if it doesn't exist). Leave empty for vault root.")
+            .addText((text) =>
+                text
+                    .setPlaceholder("YouTube")
+                    .setValue(this.plugin.settings.outputFolder)
                     .onChange(async (value) => {
-                        this.plugin.settings.cookieBrowser = value;
+                        this.plugin.settings.outputFolder = value.trim();
                         await this.plugin.saveSettings();
                     })
             );
 
         const cookieSetting = new Setting(containerEl)
-            .setName("YouTube Cookie File (fallback)")
+            .setName("cookies.txt (fallback only)")
             .setDesc(
-                "Upload a Netscape cookies.txt file to the backend. Use this if the browser option above doesn't work. Export with a browser extension like 'Get cookies.txt LOCALLY'."
+                "The backend uses Safari cookies automatically. Upload a Netscape cookies.txt only if you can't grant Full Disk Access to the backend (see README)."
             );
 
         const cookieStatusEl = containerEl.createDiv({ cls: "yt-obsidian-cookie-status" });
@@ -88,10 +73,10 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                 const resp = await fetch(`${apiUrl}/cookies`);
                 const data = await resp.json();
                 if (data.has_cookies) {
-                    cookieStatusEl.setText("Cookie file is uploaded on the backend.");
+                    cookieStatusEl.setText("Fallback cookies.txt is uploaded.");
                     cookieStatusEl.style.color = "var(--text-success)";
                 } else {
-                    cookieStatusEl.setText("No cookie file on the backend.");
+                    cookieStatusEl.setText("No fallback uploaded (fine — Safari path is primary).");
                     cookieStatusEl.style.color = "var(--text-muted)";
                 }
             } catch {
@@ -116,7 +101,7 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                     body: JSON.stringify({ content }),
                 });
                 if (!resp.ok) throw new Error("Upload failed");
-                new Notice("Cookie file uploaded to backend.");
+                new Notice("Cookie file uploaded.");
             } catch {
                 new Notice("Failed to upload cookie file. Is the backend running?");
             }
@@ -125,7 +110,7 @@ export class YTObsidianSettingTab extends PluginSettingTab {
         });
 
         cookieSetting.addButton((btn) =>
-            btn.setButtonText("Browse...").onClick(() => fileInput.click())
+            btn.setButtonText("Upload…").onClick(() => fileInput.click())
         );
 
         cookieSetting.addButton((btn) =>
@@ -136,25 +121,12 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                     try {
                         const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
                         await fetch(`${apiUrl}/cookies`, { method: "DELETE" });
-                        new Notice("Cookie file removed from backend.");
+                        new Notice("Cookie file removed.");
                     } catch {
                         new Notice("Failed to remove cookie file.");
                     }
                     refreshCookieStatus();
                 })
         );
-
-        new Setting(containerEl)
-            .setName("Output Folder")
-            .setDesc("Vault folder where notes will be saved (created if it doesn't exist). Leave empty for vault root.")
-            .addText((text) =>
-                text
-                    .setPlaceholder("YouTube")
-                    .setValue(this.plugin.settings.outputFolder)
-                    .onChange(async (value) => {
-                        this.plugin.settings.outputFolder = value.trim();
-                        await this.plugin.saveSettings();
-                    })
-            );
     }
 }

@@ -1,5 +1,9 @@
 import re
 import os
+import sys
+import glob
+import http.cookiejar
+from pathlib import Path
 import httpx
 from fastapi import HTTPException
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -8,6 +12,38 @@ from cookies import COOKIE_FILE_PATH
 
 
 VALID_BROWSERS = {"chrome", "firefox", "safari", "edge", "brave"}
+
+
+def _resolve_cookie_path(cookie_file: str | None) -> str | None:
+    if cookie_file and os.path.isfile(cookie_file):
+        return cookie_file
+    if COOKIE_FILE_PATH.is_file():
+        return str(COOKIE_FILE_PATH)
+    return None
+
+
+def _browser_cookies_readable(browser: str) -> bool:
+    """Return True iff the current process can actually read the browser's cookie store.
+    On macOS, Safari's cookies are TCC-protected — without Full Disk Access the read
+    raises PermissionError. Returning False lets the caller fall back to cookies.txt."""
+    if sys.platform != "darwin":
+        return False
+    home = Path.home()
+    candidates: list[Path] = {
+        "safari":  [home / "Library/Cookies/Cookies.binarycookies"],
+        "chrome":  [home / "Library/Application Support/Google/Chrome/Default/Cookies"],
+        "firefox": [Path(p) for p in glob.glob(str(home / "Library/Application Support/Firefox/Profiles/*/cookies.sqlite"))],
+        "edge":    [home / "Library/Application Support/Microsoft Edge/Default/Cookies"],
+        "brave":   [home / "Library/Application Support/BraveSoftware/Brave-Browser/Default/Cookies"],
+    }.get(browser, [])
+    for p in candidates:
+        try:
+            with open(p, "rb") as f:
+                f.read(1)
+            return True
+        except (PermissionError, OSError):
+            continue
+    return False
 
 
 def extract_video_id(url: str) -> str:
@@ -23,12 +59,16 @@ def extract_video_id(url: str) -> str:
 
 
 def _apply_cookies(opts: dict, cookie_browser: str | None, cookie_file: str | None) -> None:
-    """Apply cookie config to yt-dlp opts. Prefers browser extraction, then explicit file, then uploaded file."""
-    if cookie_browser and cookie_browser in VALID_BROWSERS:
+    """Apply cookie config to yt-dlp opts. Browser extraction is preferred, but if the
+    browser's cookie store isn't readable (e.g. Full Disk Access not granted for Safari,
+    or running inside Linux Docker), we fall through to the uploaded cookies.txt."""
+    if cookie_browser and cookie_browser in VALID_BROWSERS and _browser_cookies_readable(cookie_browser):
         opts["cookiesfrombrowser"] = (cookie_browser,)
-    elif cookie_file and os.path.isfile(cookie_file):
+        return
+    if cookie_file and os.path.isfile(cookie_file):
         opts["cookiefile"] = cookie_file
-    elif COOKIE_FILE_PATH.is_file():
+        return
+    if COOKIE_FILE_PATH.is_file():
         opts["cookiefile"] = str(COOKIE_FILE_PATH)
 
 
@@ -67,8 +107,9 @@ def get_video_metadata(url: str, cookie_browser: str | None = None, cookie_file:
 
 def get_transcript(video_id: str, cookie_browser: str | None = None, cookie_file: str | None = None) -> tuple[list, bool]:
     """Returns (transcript_entries, is_multi_speaker). Falls back to yt-dlp subtitles."""
+    cookie_path = _resolve_cookie_path(cookie_file)
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookie_path)
         try:
             transcript = transcript_list.find_manually_created_transcript(["en", "en-US", "en-GB"])
         except Exception:
@@ -105,6 +146,14 @@ def _get_transcript_via_ytdlp(video_id: str, cookie_browser: str | None = None, 
         "subtitlesformat": "json3",
     }
     _apply_cookies(ydl_opts, cookie_browser, cookie_file)
+    cookie_path = _resolve_cookie_path(cookie_file)
+    jar: http.cookiejar.MozillaCookieJar | None = None
+    if cookie_path:
+        jar = http.cookiejar.MozillaCookieJar(cookie_path)
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+        except Exception:
+            jar = None
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -116,7 +165,7 @@ def _get_transcript_via_ytdlp(video_id: str, cookie_browser: str | None = None, 
             sub_url = sub_info.get("url")
             if not sub_url:
                 continue
-            resp = httpx.get(sub_url, timeout=30)
+            resp = httpx.get(sub_url, cookies=jar, timeout=30)
             resp.raise_for_status()
             data = resp.json()
             entries = []
