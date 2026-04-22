@@ -190,6 +190,21 @@ export class YouTubeImportModal extends Modal {
                         "warning"
                     );
                     this.skipDuplicateCheck = true;
+                    this.btnRow.empty();
+                    const cancelBtn2 = this.btnRow.createEl("button", { text: "Cancel" });
+                    cancelBtn2.addEventListener("click", () => this.close());
+                    const goBtn = this.btnRow.createEl("button", { text: "Take me there", cls: "mod-cta" });
+                    goBtn.addEventListener("click", async () => {
+                        await this.app.workspace.openLinkText(existing.path, "", false);
+                        this.close();
+                    });
+                    const importAgainBtn = this.btnRow.createEl("button", { text: "Import anyway" });
+                    importAgainBtn.addEventListener("click", () => {
+                        this.btnRow.empty();
+                        this.btnRow.appendChild(this.cancelBtn);
+                        this.btnRow.appendChild(this.importBtn);
+                        this.startImport();
+                    });
                     return;
                 }
             }
@@ -244,7 +259,7 @@ export class YouTubeImportModal extends Modal {
             await this.app.workspace.openLinkText(file.path, "", false);
 
             this.btnRow.empty();
-            const closeBtn = this.btnRow.createEl("button", { text: "Close", cls: "mod-cta" });
+            const closeBtn = this.btnRow.createEl("button", { text: "Ok", cls: "mod-cta" });
             closeBtn.addEventListener("click", () => this.close());
         } catch (error) {
             console.error("[YT Obsidian]", error);
