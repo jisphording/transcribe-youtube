@@ -6,7 +6,7 @@ A full-stack app that imports YouTube videos as structured Obsidian notes. It fe
 
 - **Frontend:** TypeScript Obsidian plugin (`obsidian-plugin/`)
 - **Backend:** Python FastAPI with SSE streaming (`backend/`)
-- **Deployment:** Docker + docker-compose
+- **Deployment:** macOS LaunchAgent (uvicorn, managed via `backend/scripts/`)
 - **AI:** Anthropic Claude API (Sonnet 4.6 / Opus 4.6)
 
 ## Code Style
@@ -93,14 +93,20 @@ Prompts live in `backend/prompts/` and are composed at runtime.
 
 ## Build & Run Commands
 
-### Backend (Docker)
+### Backend (LaunchAgent)
+
+The backend runs as a native Python process via a macOS LaunchAgent. Managed with scripts in `backend/scripts/`:
 
 ```bash
-docker compose up -d              # Start backend
-docker compose up -d --build      # Rebuild and start
-docker compose logs -f            # Tail logs
+./backend/scripts/start.sh        # Load and start the LaunchAgent
+./backend/scripts/stop.sh         # Unload (stop) the LaunchAgent
+./backend/scripts/logs.sh         # Tail stdout + stderr logs
+./backend/scripts/install.sh      # First-time install (creates the plist)
+./backend/scripts/update.sh       # Pull changes and restart
 curl http://localhost:8000/health # Health check
 ```
+
+After changing `backend/.env`, restart with `stop.sh` then `start.sh`.
 
 ### Obsidian Plugin
 
@@ -133,7 +139,7 @@ The `deploy` script reads `OBSIDIAN_PLUGINS_PATH` from `obsidian-plugin/.env` an
 
 Both `.env` files are gitignored. Copy the `.env.example` templates on first setup.
 
-- `backend/.env`: `ANTHROPIC_API_KEY` — required for Claude API. The container must be restarted (`docker compose up -d`) after changes.
+- `backend/.env`: `ANTHROPIC_API_KEY` — required for Claude API. The LaunchAgent must be restarted (`stop.sh` + `start.sh`) after changes.
 - `obsidian-plugin/.env`: `OBSIDIAN_PLUGINS_PATH` — primary vault deploy target. Additional vaults can be added as `OBSIDIAN_PLUGINS_PATH_2`, `_3`, etc. — `deploy.sh` picks up all matching variables automatically.
 
 ## SSE Event Protocol
