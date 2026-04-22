@@ -11,6 +11,10 @@ JSON_KEYS = [
         "description": "A concise 3-5 sentence summary of the video's main content and key takeaways.",
     },
     {
+        "key": "topics",
+        "description": "A JSON array of 5-10 short tags (1-3 words each) describing the main topics discussed.",
+    },
+    {
         "key": "transcript",
         "description": "The cleaned transcript in Markdown format.",
     },
@@ -19,6 +23,12 @@ JSON_KEYS = [
 RULES = """Rules for "summary":
 - 3-5 sentences maximum.
 - Capture the main argument, key takeaways, and conclusion.
+
+Rules for "topics":
+- 5-10 tags, each 1-3 words.
+- Lowercase, use hyphens for multi-word tags (e.g. "machine-learning", "climate-change").
+- Focus on core subject matter — concepts, domains, technologies, people — not peripheral mentions.
+- Return as a JSON array of strings.
 
 Rules for "transcript":
 - Remove ALL filler words: "um", "uh", "like", "you know", "sort of", "kind of", "basically", "literally", "actually", "right", "okay so", "so yeah", "I mean", etc.

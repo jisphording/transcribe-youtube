@@ -21,6 +21,7 @@ def build_obsidian_note(
     transcript_md: str,
     extended_summary: str = "",
     include_transcript: bool = True,
+    topics: list[str] | None = None,
 ) -> tuple[str, str]:
     """Returns (filename, markdown_content)."""
     filename = slugify(metadata["title"]) + ".md"
@@ -29,19 +30,24 @@ def build_obsidian_note(
     if metadata["thumbnail_url"]:
         thumbnail_line = f'![thumbnail]({metadata["thumbnail_url"]})\n\n'
 
-    frontmatter = f"""---
-title: "{metadata['title']}"
-channel: "{metadata['channel']}"
-channel_url: "{metadata['channel_url']}"
-url: "{metadata['url']}"
-published: "{metadata['upload_date']}"
-duration: "{metadata['duration']}"
-tags:
-  - youtube
-  - transcript
----
+    topics_yaml = ""
+    if topics:
+        topics_yaml = "topics:\n" + "\n".join(f"  - {t}" for t in topics) + "\n"
 
-"""
+    frontmatter = (
+        "---\n"
+        f'title: "{metadata["title"]}"\n'
+        f'channel: "{metadata["channel"]}"\n'
+        f'channel_url: "{metadata["channel_url"]}"\n'
+        f'url: "{metadata["url"]}"\n'
+        f'published: "{metadata["upload_date"]}"\n'
+        f'duration: "{metadata["duration"]}"\n'
+        + topics_yaml
+        + "tags:\n"
+        "  - youtube\n"
+        "  - transcript\n"
+        "---\n\n"
+    )
 
     extended_summary_section = ""
     if extended_summary.strip():

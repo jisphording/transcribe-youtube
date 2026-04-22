@@ -41,8 +41,9 @@ Return ONLY the JSON object, no other text."""
 
 _CHUNK_SUMMARY_SYSTEM = """You are a transcript summarizer.
 You will receive the cleaned transcript of a YouTube video along with its title and channel.
-Return a JSON object with exactly 1 key:
+Return a JSON object with exactly 2 keys:
 1. "summary": A concise 3-5 sentence summary of the video's main content and key takeaways.
+2. "topics": A JSON array of 5-10 short tags (1-3 words each) describing the main topics discussed. Lowercase, use hyphens for multi-word tags (e.g. "machine-learning"). Focus on core subject matter — concepts, domains, technologies, people.
 
 Return ONLY the JSON object, no other text."""
 
@@ -251,6 +252,7 @@ async def process_video(request: TranscriptRequest):
                     summary_result = {}
 
                 summary = summary_result.get("summary", "")
+                topics = summary_result.get("topics", [])
                 transcript_md = combined_cleaned
                 extended_summary = ""
 
@@ -323,6 +325,7 @@ Please process this transcript according to the instructions."""
                     return
 
                 summary = result.get("summary", "")
+                topics = result.get("topics", [])
                 extended_summary = result.get("extended_summary", "") if request.extended_summary else ""
                 transcript_md = result.get("transcript", "")
 
@@ -334,6 +337,7 @@ Please process this transcript according to the instructions."""
                 metadata, summary, transcript_md,
                 extended_summary=extended_summary,
                 include_transcript=request.include_transcript,
+                topics=topics,
             )
 
             yield _sse_event("done", "Done!", filename=filename, content=note_content, metadata=metadata)
