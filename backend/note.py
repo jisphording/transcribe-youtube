@@ -22,6 +22,7 @@ def build_obsidian_note(
     extended_summary: str = "",
     include_transcript: bool = True,
     topics: list[str] | None = None,
+    resources: list[dict] | None = None,
 ) -> tuple[str, str]:
     """Returns (filename, markdown_content)."""
     filename = slugify(metadata["title"]) + ".md"
@@ -48,6 +49,17 @@ def build_obsidian_note(
         "  - transcript\n"
         "---\n\n"
     )
+
+    resources_section = ""
+    if resources:
+        lines = []
+        for r in resources:
+            name = r.get("name", "")
+            rtype = r.get("type", "")
+            if name:
+                lines.append(f"- [[{name}]]" + (f" *({rtype})*" if rtype else ""))
+        if lines:
+            resources_section = "## Mentioned Resources\n\n" + "\n".join(lines) + "\n\n---\n\n"
 
     extended_summary_section = ""
     if extended_summary.strip():
@@ -77,6 +89,7 @@ def build_obsidian_note(
         + "## Summary\n\n"
         + summary.strip()
         + "\n\n---\n\n"
+        + resources_section
         + extended_summary_section
         + transcript_section
     )

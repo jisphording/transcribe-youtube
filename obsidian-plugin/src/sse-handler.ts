@@ -3,17 +3,23 @@ export interface SSECallbacks {
     onDetail(detail: string): void;
 }
 
+export interface SSEResource {
+    name: string;
+    type: string;
+}
+
 export interface SSEResult {
     filename: string;
     content: string;
     costUsd: number | null;
+    resources: SSEResource[];
 }
 
 export async function processSSEStream(response: Response, callbacks: SSECallbacks): Promise<SSEResult> {
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    let doneData: { filename: string; content: string } | null = null;
+    let doneData: { filename: string; content: string; resources: SSEResource[] } | null = null;
     let costUsd: number | null = null;
 
     while (true) {
@@ -84,6 +90,7 @@ export async function processSSEStream(response: Response, callbacks: SSECallbac
                     doneData = {
                         filename: event.filename as string,
                         content: event.content as string,
+                        resources: (event.resources as SSEResource[]) ?? [],
                     };
                     break;
                 case "error":

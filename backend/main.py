@@ -39,13 +39,20 @@ Rules for "transcript":
 
 Return ONLY the JSON object, no other text."""
 
-_CHUNK_SUMMARY_SYSTEM = """You are a transcript summarizer.
+_CHUNK_SUMMARY_SYSTEM_BASE = """You are a transcript summarizer.
 You will receive the cleaned transcript of a YouTube video along with its title and channel.
-Return a JSON object with exactly 2 keys:
+Return a JSON object with exactly {key_count} keys:
 1. "summary": A concise 3-5 sentence summary of the video's main content and key takeaways.
 2. "topics": A JSON array of 5-10 short tags (1-3 words each) describing the main topics discussed. Lowercase, use hyphens for multi-word tags (e.g. "machine-learning"). Focus on core subject matter — concepts, domains, technologies, people.
-
+{resources_key}
 Return ONLY the JSON object, no other text."""
+
+
+def _build_chunk_summary_system(extract_resources: bool) -> str:
+    if extract_resources:
+        resources_key = '3. "resources": A JSON array of objects (each with "name" and "type") for every product, software, website, service, tool, or platform mentioned by name. Deduplicate. Return [] if none.'
+        return _CHUNK_SUMMARY_SYSTEM_BASE.format(key_count=3, resources_key=resources_key)
+    return _CHUNK_SUMMARY_SYSTEM_BASE.format(key_count=2, resources_key="")
 
 
 def _split_transcript(text: str, chunk_size: int) -> list[str]:
@@ -155,6 +162,8 @@ async def process_video(request: TranscriptRequest):
             features = ["base"]
             if request.extended_summary:
                 features.append("extended")
+            if request.extract_resources:
+                features.append("resources")
 
             if request.extended_summary:
                 model = request.extended_model if request.extended_model in VALID_MODELS else DEFAULT_EXTENDED_MODEL
@@ -224,8 +233,9 @@ async def process_video(request: TranscriptRequest):
                     f"Transcript:\n{combined_cleaned[:40_000]}"
                 )
                 summary_raw = None
+                chunk_summary_system = _build_chunk_summary_system(request.extract_resources)
                 try:
-                    for update in stream_claude(model, _CHUNK_SUMMARY_SYSTEM, summary_user):
+                    for update in stream_claude(model, chunk_summary_system, summary_user):
                         if update["type"] == "done":
                             summary_raw = update["response"]
                             total_in_tokens += update["input_tokens"]
@@ -253,6 +263,7 @@ async def process_video(request: TranscriptRequest):
 
                 summary = summary_result.get("summary", "")
                 topics = summary_result.get("topics", [])
+                resources = summary_result.get("resources", []) if request.extract_resources else []
                 transcript_md = combined_cleaned
                 extended_summary = ""
 
@@ -326,6 +337,7 @@ Please process this transcript according to the instructions."""
 
                 summary = result.get("summary", "")
                 topics = result.get("topics", [])
+                resources = result.get("resources", []) if request.extract_resources else []
                 extended_summary = result.get("extended_summary", "") if request.extended_summary else ""
                 transcript_md = result.get("transcript", "")
 
@@ -338,9 +350,10 @@ Please process this transcript according to the instructions."""
                 extended_summary=extended_summary,
                 include_transcript=request.include_transcript,
                 topics=topics,
+                resources=resources,
             )
 
-            yield _sse_event("done", "Done!", filename=filename, content=note_content, metadata=metadata)
+            yield _sse_event("done", "Done!", filename=filename, content=note_content, metadata=metadata, resources=resources)
 
         except Exception as e:
             yield _sse_event("error", f"Unexpected error: {e}")

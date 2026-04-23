@@ -25,6 +25,11 @@ PROMPTS = {
         "description": "Topic-by-topic editorial rewrite",
         "module": "prompts.extended",
     },
+    "resources": {
+        "name": "Mentioned Resources",
+        "description": "Extract all products, software, websites, and services mentioned",
+        "module": "prompts.resources",
+    },
 }
 
 

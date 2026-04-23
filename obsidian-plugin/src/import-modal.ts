@@ -9,6 +9,7 @@ export class YouTubeImportModal extends Modal {
     importMode: "transcript" | "extended_summary" = "transcript";
     modeToggleBtns: HTMLButtonElement[] = [];
     modelSelect: HTMLSelectElement;
+    extractResourcesCheckbox: HTMLInputElement;
     statusEl: HTMLElement;
     detailEl: HTMLElement;
     progressWrapper: HTMLElement;
@@ -117,6 +118,24 @@ export class YouTubeImportModal extends Modal {
         this.modelSelect.createEl("option", { text: "Opus (highest quality)", value: "claude-opus-4-6" });
         this.modelSelect.value = "claude-haiku-4-5-20251001";
 
+        // Extract resources toggle
+        const resourcesWrapper = contentEl.createDiv({ cls: "yt-obsidian-resources-wrapper" });
+        resourcesWrapper.style.marginTop = "10px";
+        resourcesWrapper.style.display = "flex";
+        resourcesWrapper.style.alignItems = "center";
+        resourcesWrapper.style.gap = "8px";
+
+        this.extractResourcesCheckbox = resourcesWrapper.createEl("input", { type: "checkbox" });
+        this.extractResourcesCheckbox.id = "yt-extract-resources";
+        this.extractResourcesCheckbox.checked = true;
+
+        const resourcesLabel = resourcesWrapper.createEl("label", {
+            text: "Extract mentioned products, tools & services",
+            attr: { for: "yt-extract-resources" },
+        });
+        resourcesLabel.style.fontSize = "13px";
+        resourcesLabel.style.cursor = "pointer";
+
         // Progress bar
         const progressWrapper = contentEl.createDiv({ cls: "yt-obsidian-progress-wrapper" });
         progressWrapper.style.marginTop = "12px";
@@ -215,6 +234,7 @@ export class YouTubeImportModal extends Modal {
         this.urlInput.disabled = true;
         this.modeToggleBtns.forEach((b) => (b.disabled = true));
         this.modelSelect.disabled = true;
+        this.extractResourcesCheckbox.disabled = true;
         this.setStatus("\u23F3 Connecting to backend\u2026", "info");
 
         try {
@@ -226,6 +246,9 @@ export class YouTubeImportModal extends Modal {
                 body.extended_model = this.modelSelect.value;
             } else {
                 body.model = this.modelSelect.value;
+            }
+            if (this.extractResourcesCheckbox.checked) {
+                body.extract_resources = true;
             }
 
             const response = await fetch(`${apiUrl}/process`, {
@@ -250,6 +273,9 @@ export class YouTubeImportModal extends Modal {
             });
 
             const file = await this.plugin.createNote(result.filename, result.content);
+            if (result.resources.length > 0) {
+                await this.plugin.createResourceStubs(result.resources);
+            }
 
             new Notice(`Created: ${file.path}`);
             this.progressBarInner.style.width = "100%";
@@ -270,6 +296,7 @@ export class YouTubeImportModal extends Modal {
             this.urlInput.disabled = false;
             this.modeToggleBtns.forEach((b) => (b.disabled = false));
             this.modelSelect.disabled = false;
+            this.extractResourcesCheckbox.disabled = false;
         }
     }
 

@@ -1,4 +1,5 @@
 import { Plugin, TFile, normalizePath } from "obsidian";
+import type { SSEResource } from "./sse-handler";
 import { YTObsidianSettings, DEFAULT_SETTINGS, YTObsidianSettingTab } from "./settings";
 import { YouTubeImportModal } from "./import-modal";
 
@@ -45,5 +46,29 @@ export default class YTObsidianPlugin extends Plugin {
         }
 
         return await this.app.vault.create(finalPath, content);
+    }
+
+    async createResourceStubs(resources: SSEResource[]): Promise<void> {
+        const folder = this.settings.outputFolder.trim();
+        const allFiles = this.app.vault.getFiles();
+        const folderPrefix = folder ? folder + "/" : "";
+
+        for (const resource of resources) {
+            const name = resource.name.trim();
+            if (!name) continue;
+
+            // Skip if a file with this name already exists in the transcript folder or subfolders
+            const alreadyExists = allFiles.some(
+                (f) =>
+                    f.basename.toLowerCase() === name.toLowerCase() &&
+                    (folderPrefix === "" || f.path.startsWith(folderPrefix))
+            );
+            if (alreadyExists) continue;
+
+            const stubPath = normalizePath(folderPrefix ? `${folder}/${name}.md` : `${name}.md`);
+            if (!this.app.vault.getAbstractFileByPath(stubPath)) {
+                await this.app.vault.create(stubPath, "");
+            }
+        }
     }
 }
