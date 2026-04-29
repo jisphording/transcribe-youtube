@@ -10,6 +10,7 @@ export class YouTubeImportModal extends Modal {
     modeToggleBtns: HTMLButtonElement[] = [];
     focusTopicWrapper: HTMLElement;
     focusTopicInput: HTMLTextAreaElement;
+    focusIncludeExtendedCheckbox: HTMLInputElement;
     modelSelect: HTMLSelectElement;
     extractResourcesCheckbox: HTMLInputElement;
     statusEl: HTMLElement;
@@ -124,6 +125,30 @@ export class YouTubeImportModal extends Modal {
         this.focusTopicInput.style.resize = "vertical";
         this.focusTopicInput.style.boxSizing = "border-box";
 
+        const focusExtendedRow = this.focusTopicWrapper.createDiv({ cls: "yt-obsidian-focus-extended-row" });
+        focusExtendedRow.style.marginTop = "8px";
+        focusExtendedRow.style.display = "flex";
+        focusExtendedRow.style.alignItems = "center";
+        focusExtendedRow.style.gap = "8px";
+
+        this.focusIncludeExtendedCheckbox = focusExtendedRow.createEl("input", { type: "checkbox" });
+        this.focusIncludeExtendedCheckbox.id = "yt-focus-include-extended";
+        this.focusIncludeExtendedCheckbox.checked = false;
+        this.focusIncludeExtendedCheckbox.addEventListener("change", () => {
+            if (this.focusIncludeExtendedCheckbox.checked) {
+                this.modelSelect.value = "claude-opus-4-7";
+            } else {
+                this.modelSelect.value = "claude-sonnet-4-6";
+            }
+        });
+
+        const focusExtendedLabel = focusExtendedRow.createEl("label", {
+            text: "Also include extended summary (Opus)",
+            attr: { for: "yt-focus-include-extended" },
+        });
+        focusExtendedLabel.style.fontSize = "13px";
+        focusExtendedLabel.style.cursor = "pointer";
+
         // Model selection
         const modelWrapper = contentEl.createDiv({ cls: "yt-obsidian-model-wrapper" });
         modelWrapper.style.marginTop = "12px";
@@ -138,7 +163,7 @@ export class YouTubeImportModal extends Modal {
         });
         this.modelSelect.createEl("option", { text: "Haiku (fastest, cheapest)", value: "claude-haiku-4-5-20251001" });
         this.modelSelect.createEl("option", { text: "Sonnet (balanced)", value: "claude-sonnet-4-6" });
-        this.modelSelect.createEl("option", { text: "Opus (highest quality)", value: "claude-opus-4-6" });
+        this.modelSelect.createEl("option", { text: "Opus (highest quality)", value: "claude-opus-4-7" });
         this.modelSelect.value = "claude-haiku-4-5-20251001";
 
         // Extract resources toggle
@@ -264,6 +289,7 @@ export class YouTubeImportModal extends Modal {
         this.modelSelect.disabled = true;
         this.extractResourcesCheckbox.disabled = true;
         this.focusTopicInput.disabled = true;
+        this.focusIncludeExtendedCheckbox.disabled = true;
         this.setStatus("\u23F3 Connecting to backend\u2026", "info");
 
         try {
@@ -277,6 +303,9 @@ export class YouTubeImportModal extends Modal {
                 body.focus_topic = this.focusTopicInput.value.trim();
                 body.include_transcript = false;
                 body.extended_model = this.modelSelect.value;
+                if (this.focusIncludeExtendedCheckbox.checked) {
+                    body.focus_include_extended = true;
+                }
             } else {
                 body.model = this.modelSelect.value;
             }
@@ -331,6 +360,7 @@ export class YouTubeImportModal extends Modal {
             this.modelSelect.disabled = false;
             this.extractResourcesCheckbox.disabled = false;
             this.focusTopicInput.disabled = false;
+            this.focusIncludeExtendedCheckbox.disabled = false;
         }
     }
 

@@ -73,7 +73,7 @@ def build_obsidian_note(
 
     focused_summary_section = ""
     if focused_summary.strip():
-        heading = f"## Focus: {focus_topic}" if focus_topic else "## Focused Summary"
+        heading = f"## Focus: {focus_topic}" if focus_topic else "## Focus"
         focused_summary_section = (
             heading + "\n\n"
             + _demote_headings(focused_summary.strip())
@@ -100,8 +100,8 @@ def build_obsidian_note(
         + "## Summary\n\n"
         + summary.strip()
         + "\n\n---\n\n"
-        + resources_section
         + focused_summary_section
+        + resources_section
         + extended_summary_section
         + transcript_section
     )

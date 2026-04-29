@@ -7,6 +7,7 @@ class TranscriptRequest(BaseModel):
     cookie_file: str | None = None
     extended_summary: bool = False
     focus_topic: str | None = None
+    focus_include_extended: bool = False
     include_transcript: bool = True
     extract_resources: bool = False
     model: str = "claude-haiku-4-5-20251001"

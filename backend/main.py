@@ -90,7 +90,7 @@ def _sse_event(stage: str, message: str, **extra) -> str:
 MODEL_PRICING = {
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
     "claude-sonnet-4-6":         {"input": 3.00, "output": 15.00},
-    "claude-opus-4-6":           {"input": 5.00, "output": 25.00},
+    "claude-opus-4-7":           {"input": 15.00, "output": 75.00},
 }
 
 
@@ -160,14 +160,14 @@ async def process_video(request: TranscriptRequest):
 
             # Step 3: Claude processing
             features = ["base"]
-            if request.extended_summary:
+            if request.extended_summary or request.focus_include_extended:
                 features.append("extended")
             if request.focus_topic:
                 features.append("focus")
             if request.extract_resources:
                 features.append("resources")
 
-            use_extended_model = request.extended_summary or bool(request.focus_topic)
+            use_extended_model = request.extended_summary or bool(request.focus_topic) or request.focus_include_extended
             if use_extended_model:
                 model = request.extended_model if request.extended_model in VALID_MODELS else DEFAULT_EXTENDED_MODEL
             else:
@@ -348,7 +348,7 @@ Please process this transcript according to the instructions."""
                 summary = result.get("summary", "")
                 topics = result.get("topics", [])
                 resources = result.get("resources", []) if request.extract_resources else []
-                extended_summary = result.get("extended_summary", "") if request.extended_summary else ""
+                extended_summary = result.get("extended_summary", "") if (request.extended_summary or request.focus_include_extended) else ""
                 focused_summary = result.get("focused_summary", "") if request.focus_topic else ""
                 transcript_md = result.get("transcript", "")
 

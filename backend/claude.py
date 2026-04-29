@@ -8,14 +8,14 @@ import anthropic
 
 client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-VALID_MODELS = {"claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6"}
+VALID_MODELS = {"claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-7"}
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_EXTENDED_MODEL = "claude-sonnet-4-6"
 
 MODEL_MAX_OUTPUT_TOKENS = {
     "claude-haiku-4-5-20251001": 8192,
     "claude-sonnet-4-6": 128000,
-    "claude-opus-4-6": 128000,
+    "claude-opus-4-7": 128000,
 }
 
 
