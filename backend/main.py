@@ -162,17 +162,25 @@ async def process_video(request: TranscriptRequest):
             features = ["base"]
             if request.extended_summary:
                 features.append("extended")
+            if request.focus_topic:
+                features.append("focus")
             if request.extract_resources:
                 features.append("resources")
 
-            if request.extended_summary:
+            use_extended_model = request.extended_summary or bool(request.focus_topic)
+            if use_extended_model:
                 model = request.extended_model if request.extended_model in VALID_MODELS else DEFAULT_EXTENDED_MODEL
             else:
                 model = request.model if request.model in VALID_MODELS else DEFAULT_MODEL
-            stage_label = "claude_extended" if request.extended_summary else "claude"
+            if request.focus_topic:
+                stage_label = "claude_focus"
+            elif request.extended_summary:
+                stage_label = "claude_extended"
+            else:
+                stage_label = "claude"
 
             use_chunks = (
-                not request.extended_summary
+                not use_extended_model
                 and model == "claude-haiku-4-5-20251001"
                 and transcript_chars > _CHUNK_THRESHOLD_CHARS
             )
@@ -266,6 +274,7 @@ async def process_video(request: TranscriptRequest):
                 resources = summary_result.get("resources", []) if request.extract_resources else []
                 transcript_md = combined_cleaned
                 extended_summary = ""
+                focused_summary = ""
 
             else:
                 # ── Single-call path ──
@@ -277,11 +286,12 @@ async def process_video(request: TranscriptRequest):
                                      total=total_steps, model=model.split("-")[-1].capitalize(), task=task_desc),
                                  step=3, total_steps=total_steps)
 
+                focus_line = f"\nFocus instruction: {request.focus_topic}" if request.focus_topic else ""
                 user_message = f"""Video Title: {metadata['title']}
 Channel: {metadata['channel']}
 Video duration: {metadata['duration']}
 Description excerpt: {metadata['description']}
-Multi-speaker detected: {is_multi_speaker}
+Multi-speaker detected: {is_multi_speaker}{focus_line}
 
 --- RAW TRANSCRIPT ---
 {raw_text}
@@ -339,6 +349,7 @@ Please process this transcript according to the instructions."""
                 topics = result.get("topics", [])
                 resources = result.get("resources", []) if request.extract_resources else []
                 extended_summary = result.get("extended_summary", "") if request.extended_summary else ""
+                focused_summary = result.get("focused_summary", "") if request.focus_topic else ""
                 transcript_md = result.get("transcript", "")
 
             # Step 4: Build note
@@ -348,6 +359,8 @@ Please process this transcript according to the instructions."""
             filename, note_content = build_obsidian_note(
                 metadata, summary, transcript_md,
                 extended_summary=extended_summary,
+                focused_summary=focused_summary,
+                focus_topic=request.focus_topic or "",
                 include_transcript=request.include_transcript,
                 topics=topics,
                 resources=resources,

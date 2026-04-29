@@ -63,6 +63,7 @@ export async function processSSEStream(response: Response, callbacks: SSECallbac
                     break;
                 case "claude":
                 case "claude_extended":
+                case "claude_focus":
                     callbacks.onProgress(step, totalSteps, `\uD83E\uDD16 ${message}`);
                     if (event.input_tokens || event.output_tokens) {
                         const inTok = ((event.input_tokens as number) ?? 0).toLocaleString();

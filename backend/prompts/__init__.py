@@ -30,6 +30,11 @@ PROMPTS = {
         "description": "Extract all products, software, websites, and services mentioned",
         "module": "prompts.resources",
     },
+    "focus": {
+        "name": "Focus Topic",
+        "description": "Deep-dive summary focused on a user-specified topic",
+        "module": "prompts.focus",
+    },
 }
 
 

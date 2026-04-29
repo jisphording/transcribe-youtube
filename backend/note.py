@@ -20,6 +20,8 @@ def build_obsidian_note(
     summary: str,
     transcript_md: str,
     extended_summary: str = "",
+    focused_summary: str = "",
+    focus_topic: str = "",
     include_transcript: bool = True,
     topics: list[str] | None = None,
     resources: list[dict] | None = None,
@@ -69,6 +71,15 @@ def build_obsidian_note(
             + "\n\n---\n\n"
         )
 
+    focused_summary_section = ""
+    if focused_summary.strip():
+        heading = f"## Focus: {focus_topic}" if focus_topic else "## Focused Summary"
+        focused_summary_section = (
+            heading + "\n\n"
+            + _demote_headings(focused_summary.strip())
+            + "\n\n---\n\n"
+        )
+
     transcript_section = ""
     if include_transcript and transcript_md.strip():
         transcript_section = (
@@ -90,6 +101,7 @@ def build_obsidian_note(
         + summary.strip()
         + "\n\n---\n\n"
         + resources_section
+        + focused_summary_section
         + extended_summary_section
         + transcript_section
     )

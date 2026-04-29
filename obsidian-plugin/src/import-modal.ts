@@ -6,8 +6,10 @@ import { processSSEStream } from "./sse-handler";
 export class YouTubeImportModal extends Modal {
     plugin: YTObsidianPlugin;
     urlInput: HTMLInputElement;
-    importMode: "transcript" | "extended_summary" = "transcript";
+    importMode: "transcript" | "extended_summary" | "focus_topic" = "transcript";
     modeToggleBtns: HTMLButtonElement[] = [];
+    focusTopicWrapper: HTMLElement;
+    focusTopicInput: HTMLTextAreaElement;
     modelSelect: HTMLSelectElement;
     extractResourcesCheckbox: HTMLInputElement;
     statusEl: HTMLElement;
@@ -71,9 +73,10 @@ export class YouTubeImportModal extends Modal {
         toggleRow.style.border = "1px solid var(--background-modifier-border)";
         toggleRow.style.width = "fit-content";
 
-        const modes: Array<{ value: "transcript" | "extended_summary"; label: string }> = [
+        const modes: Array<{ value: "transcript" | "extended_summary" | "focus_topic"; label: string }> = [
             { value: "transcript", label: "Transcript" },
             { value: "extended_summary", label: "Extended Summary" },
+            { value: "focus_topic", label: "Focus Topic" },
         ];
 
         this.modeToggleBtns = modes.map(({ value, label }) => {
@@ -96,10 +99,30 @@ export class YouTubeImportModal extends Modal {
                     b.style.backgroundColor = isActive ? "var(--interactive-accent)" : "var(--background-primary)";
                     b.style.color = isActive ? "var(--text-on-accent)" : "var(--text-normal)";
                 });
-                this.modelSelect.value = value === "extended_summary" ? "claude-sonnet-4-6" : "claude-haiku-4-5-20251001";
+                this.focusTopicWrapper.style.display = value === "focus_topic" ? "block" : "none";
+                if (value === "transcript") {
+                    this.modelSelect.value = "claude-haiku-4-5-20251001";
+                } else {
+                    this.modelSelect.value = "claude-sonnet-4-6";
+                }
             });
             return btn;
         });
+
+        // Focus topic input (shown only in focus_topic mode)
+        this.focusTopicWrapper = toggleWrapper.createDiv({ cls: "yt-obsidian-focus-wrapper" });
+        this.focusTopicWrapper.style.marginTop = "8px";
+        this.focusTopicWrapper.style.display = "none";
+
+        this.focusTopicInput = this.focusTopicWrapper.createEl("textarea", {
+            placeholder: 'e.g. "Focus on the guest\'s views on marketing for junior designers"',
+            cls: "yt-obsidian-focus-input",
+        });
+        this.focusTopicInput.style.width = "100%";
+        this.focusTopicInput.style.minHeight = "56px";
+        this.focusTopicInput.style.fontSize = "13px";
+        this.focusTopicInput.style.resize = "vertical";
+        this.focusTopicInput.style.boxSizing = "border-box";
 
         // Model selection
         const modelWrapper = contentEl.createDiv({ cls: "yt-obsidian-model-wrapper" });
@@ -230,11 +253,17 @@ export class YouTubeImportModal extends Modal {
         }
         this.skipDuplicateCheck = false;
 
+        if (this.importMode === "focus_topic" && !this.focusTopicInput.value.trim()) {
+            this.setStatus("\u26A0\uFE0F Please enter a focus instruction.", "warning");
+            return;
+        }
+
         this.importBtn.disabled = true;
         this.urlInput.disabled = true;
         this.modeToggleBtns.forEach((b) => (b.disabled = true));
         this.modelSelect.disabled = true;
         this.extractResourcesCheckbox.disabled = true;
+        this.focusTopicInput.disabled = true;
         this.setStatus("\u23F3 Connecting to backend\u2026", "info");
 
         try {
@@ -242,6 +271,10 @@ export class YouTubeImportModal extends Modal {
             const body: Record<string, string | boolean> = { url, cookie_browser: "safari" };
             if (this.importMode === "extended_summary") {
                 body.extended_summary = true;
+                body.include_transcript = false;
+                body.extended_model = this.modelSelect.value;
+            } else if (this.importMode === "focus_topic") {
+                body.focus_topic = this.focusTopicInput.value.trim();
                 body.include_transcript = false;
                 body.extended_model = this.modelSelect.value;
             } else {
@@ -297,6 +330,7 @@ export class YouTubeImportModal extends Modal {
             this.modeToggleBtns.forEach((b) => (b.disabled = false));
             this.modelSelect.disabled = false;
             this.extractResourcesCheckbox.disabled = false;
+            this.focusTopicInput.disabled = false;
         }
     }
 
