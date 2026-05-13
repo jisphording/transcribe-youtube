@@ -1,9 +1,9 @@
 {
   "id": "youtube-to-obsidian",
-  "name": "YouTube to Obsidian",
-  "version": "1.0.0",
+  "name": "Media to Obsidian",
+  "version": "1.1.0",
   "minAppVersion": "1.4.0",
-  "description": "Import a YouTube video as a clean, summarized transcript note.",
+  "description": "Import a YouTube video or Apple Podcasts episode as a clean, summarized transcript note.",
   "author": "Johannes Isphording",
   "authorUrl": "studioisphording.de",
   "isDesktopOnly": true

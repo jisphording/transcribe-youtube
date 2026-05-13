@@ -1,3 +1,5 @@
+export type SSESource = "youtube" | "podcast";
+
 export interface SSECallbacks {
     onProgress(step: number, totalSteps: number, msg: string): void;
     onDetail(detail: string): void;
@@ -13,13 +15,14 @@ export interface SSEResult {
     content: string;
     costUsd: number | null;
     resources: SSEResource[];
+    source: SSESource;
 }
 
 export async function processSSEStream(response: Response, callbacks: SSECallbacks): Promise<SSEResult> {
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    let doneData: { filename: string; content: string; resources: SSEResource[] } | null = null;
+    let doneData: { filename: string; content: string; resources: SSEResource[]; source: SSESource } | null = null;
     let costUsd: number | null = null;
 
     while (true) {
@@ -49,49 +52,59 @@ export async function processSSEStream(response: Response, callbacks: SSECallbac
 
             switch (stage) {
                 case "metadata":
-                    callbacks.onProgress(step, totalSteps, `\u23F3 ${message}`);
+                    callbacks.onProgress(step, totalSteps, `⏳ ${message}`);
                     break;
                 case "metadata_done":
-                    callbacks.onProgress(step, totalSteps, `\u2713 ${message}`);
+                    callbacks.onProgress(step, totalSteps, `✓ ${message}`);
                     break;
                 case "transcript":
-                    callbacks.onProgress(step, totalSteps, `\u23F3 ${message}`);
+                    callbacks.onProgress(step, totalSteps, `⏳ ${message}`);
+                    break;
+                case "transcript_rss":
+                    callbacks.onProgress(step, totalSteps, `📄 ${message}`);
+                    break;
+                case "transcript_whisper_download":
+                    callbacks.onProgress(step, totalSteps, `⬇️ ${message}`);
+                    break;
+                case "transcript_whisper_running":
+                    callbacks.onProgress(step, totalSteps, `🎤 ${message}`);
                     break;
                 case "transcript_done":
-                    callbacks.onProgress(step, totalSteps, `\u2713 ${message}`);
+                    callbacks.onProgress(step, totalSteps, `✓ ${message}`);
                     callbacks.onDetail(`${event.segments ?? "?"} segments, ${((event.transcript_chars as number) ?? 0).toLocaleString()} chars`);
                     break;
                 case "claude":
                 case "claude_extended":
                 case "claude_focus":
-                    callbacks.onProgress(step, totalSteps, `\uD83E\uDD16 ${message}`);
+                    callbacks.onProgress(step, totalSteps, `🤖 ${message}`);
                     if (event.input_tokens || event.output_tokens) {
                         const inTok = ((event.input_tokens as number) ?? 0).toLocaleString();
                         const outTok = ((event.output_tokens as number) ?? 0).toLocaleString();
                         const elapsed = event.elapsed ? `${event.elapsed}s` : "";
-                        callbacks.onDetail(`Input: ${inTok} tokens \u00B7 Output: ${outTok} tokens${elapsed ? ` \u00B7 ${elapsed}` : ""}`);
+                        callbacks.onDetail(`Input: ${inTok} tokens · Output: ${outTok} tokens${elapsed ? ` · ${elapsed}` : ""}`);
                     }
                     break;
                 case "claude_done":
-                    callbacks.onProgress(step, totalSteps, `\u2713 ${message}`);
+                    callbacks.onProgress(step, totalSteps, `✓ ${message}`);
                     if (event.cost_usd != null) {
                         costUsd = event.cost_usd as number;
                     }
                     if (event.input_tokens || event.output_tokens) {
                         const inTok = ((event.input_tokens as number) ?? 0).toLocaleString();
                         const outTok = ((event.output_tokens as number) ?? 0).toLocaleString();
-                        const costStr = costUsd != null ? ` \u00B7 $${costUsd.toFixed(4)}` : "";
+                        const costStr = costUsd != null ? ` · $${costUsd.toFixed(4)}` : "";
                         callbacks.onDetail(`Total: ${inTok} input + ${outTok} output tokens${costStr}`);
                     }
                     break;
                 case "building":
-                    callbacks.onProgress(step, totalSteps, `\uD83D\uDCBE ${message}`);
+                    callbacks.onProgress(step, totalSteps, `💾 ${message}`);
                     break;
                 case "done":
                     doneData = {
                         filename: event.filename as string,
                         content: event.content as string,
                         resources: (event.resources as SSEResource[]) ?? [],
+                        source: ((event.source as SSESource) ?? "youtube"),
                     };
                     break;
                 case "error":

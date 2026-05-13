@@ -1,11 +1,12 @@
 import { App, Modal, Notice } from "obsidian";
 import type YTObsidianPlugin from "./main";
-import { extractVideoId, findExistingNote } from "./youtube-utils";
+import { detectSource, extractVideoId, extractAppleEpisodeId, findExistingNote, MediaSource } from "./url-utils";
 import { processSSEStream } from "./sse-handler";
 
 export class YouTubeImportModal extends Modal {
     plugin: YTObsidianPlugin;
     urlInput: HTMLInputElement;
+    sourceBadgeEl: HTMLElement;
     importMode: "transcript" | "extended_summary" | "focus_topic" = "transcript";
     modeToggleBtns: HTMLButtonElement[] = [];
     focusTopicWrapper: HTMLElement;
@@ -13,6 +14,8 @@ export class YouTubeImportModal extends Modal {
     focusIncludeExtendedCheckbox: HTMLInputElement;
     modelSelect: HTMLSelectElement;
     extractResourcesCheckbox: HTMLInputElement;
+    podcastOptionsWrapper: HTMLElement;
+    whisperLanguageInput: HTMLInputElement;
     statusEl: HTMLElement;
     detailEl: HTMLElement;
     progressWrapper: HTMLElement;
@@ -22,6 +25,7 @@ export class YouTubeImportModal extends Modal {
     cancelBtn: HTMLButtonElement;
     btnRow: HTMLElement;
     skipDuplicateCheck = false;
+    detectedSource: MediaSource = null;
 
     constructor(app: App, plugin: YTObsidianPlugin) {
         super(app);
@@ -32,19 +36,29 @@ export class YouTubeImportModal extends Modal {
         const { contentEl } = this;
         contentEl.addClass("yt-obsidian-modal");
 
-        contentEl.createEl("h2", { text: "Import YouTube Video" });
+        contentEl.createEl("h2", { text: "Import Media" });
 
         contentEl.createEl("p", {
-            text: "Paste a YouTube URL to fetch the transcript, summarize it with Claude, and create a new note.",
+            text: "Paste a YouTube or Apple Podcasts URL to fetch the transcript, summarize it with Claude, and create a new note.",
             cls: "yt-obsidian-description",
         });
 
         // URL Input
         const inputWrapper = contentEl.createDiv({ cls: "yt-obsidian-input-wrapper" });
-        inputWrapper.createEl("label", { text: "YouTube URL" });
+        const urlLabelRow = inputWrapper.createDiv();
+        urlLabelRow.style.display = "flex";
+        urlLabelRow.style.alignItems = "center";
+        urlLabelRow.style.justifyContent = "space-between";
+        urlLabelRow.createEl("label", { text: "URL" });
+        this.sourceBadgeEl = urlLabelRow.createEl("span", { text: "" });
+        this.sourceBadgeEl.style.fontSize = "11px";
+        this.sourceBadgeEl.style.padding = "2px 8px";
+        this.sourceBadgeEl.style.borderRadius = "4px";
+        this.sourceBadgeEl.style.color = "var(--text-on-accent)";
+
         this.urlInput = inputWrapper.createEl("input", {
             type: "text",
-            placeholder: "https://www.youtube.com/watch?v=...",
+            placeholder: "https://www.youtube.com/watch?v=… or https://podcasts.apple.com/…",
             cls: "yt-obsidian-url-input",
         });
         this.urlInput.style.width = "100%";
@@ -55,9 +69,10 @@ export class YouTubeImportModal extends Modal {
         });
         this.urlInput.addEventListener("input", () => {
             this.skipDuplicateCheck = false;
+            this.refreshSourceUI();
         });
 
-        // Mode toggle: Transcript / Extended Summary
+        // Mode toggle: Transcript / Extended Summary / Focus
         const toggleWrapper = contentEl.createDiv({ cls: "yt-obsidian-toggle-wrapper" });
         toggleWrapper.style.marginTop = "12px";
 
@@ -184,6 +199,26 @@ export class YouTubeImportModal extends Modal {
         resourcesLabel.style.fontSize = "13px";
         resourcesLabel.style.cursor = "pointer";
 
+        // Podcast-only options (hidden until a podcast URL is detected)
+        this.podcastOptionsWrapper = contentEl.createDiv({ cls: "yt-obsidian-podcast-options" });
+        this.podcastOptionsWrapper.style.marginTop = "10px";
+        this.podcastOptionsWrapper.style.display = "none";
+        this.podcastOptionsWrapper.style.alignItems = "center";
+        this.podcastOptionsWrapper.style.gap = "8px";
+
+        this.podcastOptionsWrapper.createEl("label", { text: "Whisper language:" }).style.fontSize = "13px";
+        this.whisperLanguageInput = this.podcastOptionsWrapper.createEl("input", {
+            type: "text",
+            placeholder: "auto",
+        });
+        this.whisperLanguageInput.style.width = "80px";
+        this.whisperLanguageInput.value = this.plugin.settings.whisperLanguage;
+        const langHint = this.podcastOptionsWrapper.createEl("span", {
+            text: "auto / en / de / fr …",
+        });
+        langHint.style.fontSize = "12px";
+        langHint.style.color = "var(--text-muted)";
+
         // Progress bar
         const progressWrapper = contentEl.createDiv({ cls: "yt-obsidian-progress-wrapper" });
         progressWrapper.style.marginTop = "12px";
@@ -231,29 +266,50 @@ export class YouTubeImportModal extends Modal {
         });
         this.importBtn.addEventListener("click", () => this.startImport());
 
+        this.refreshSourceUI();
         setTimeout(() => this.urlInput.focus(), 50);
+    }
+
+    refreshSourceUI() {
+        this.detectedSource = detectSource(this.urlInput.value);
+        if (this.detectedSource === "youtube") {
+            this.sourceBadgeEl.setText("YouTube");
+            this.sourceBadgeEl.style.backgroundColor = "var(--color-red)";
+            this.sourceBadgeEl.style.display = "";
+            this.podcastOptionsWrapper.style.display = "none";
+        } else if (this.detectedSource === "podcast") {
+            this.sourceBadgeEl.setText("Podcast");
+            this.sourceBadgeEl.style.backgroundColor = "var(--color-purple)";
+            this.sourceBadgeEl.style.display = "";
+            this.podcastOptionsWrapper.style.display = "flex";
+        } else {
+            this.sourceBadgeEl.setText("");
+            this.sourceBadgeEl.style.display = "none";
+            this.podcastOptionsWrapper.style.display = "none";
+        }
     }
 
     async startImport() {
         const url = this.urlInput.value.trim();
         if (!url) {
-            this.setStatus("\u26A0\uFE0F Please enter a YouTube URL.", "warning");
+            this.setStatus("⚠️ Please enter a URL.", "warning");
             return;
         }
 
-        if (!url.includes("youtube.com") && !url.includes("youtu.be")) {
-            this.setStatus("\u26A0\uFE0F That doesn't look like a YouTube URL.", "warning");
+        const source = detectSource(url);
+        if (source === null) {
+            this.setStatus("⚠️ That doesn't look like a YouTube or Apple Podcasts URL.", "warning");
             return;
         }
 
         if (!this.skipDuplicateCheck) {
-            const videoId = extractVideoId(url);
-            if (videoId) {
-                const folder = this.plugin.settings.outputFolder.trim();
-                const existing = await findExistingNote(this.app, folder, videoId);
+            const marker = source === "youtube" ? extractVideoId(url) : extractAppleEpisodeId(url);
+            if (marker) {
+                const folder = this.plugin.folderForSource(source);
+                const existing = await findExistingNote(this.app, folder, marker);
                 if (existing) {
                     this.setStatus(
-                        `\u26A0\uFE0F Already imported as "${existing.path}". Click Import again to overwrite.`,
+                        `⚠️ Already imported as "${existing.path}". Click Import again to overwrite.`,
                         "warning"
                     );
                     this.skipDuplicateCheck = true;
@@ -279,7 +335,7 @@ export class YouTubeImportModal extends Modal {
         this.skipDuplicateCheck = false;
 
         if (this.importMode === "focus_topic" && !this.focusTopicInput.value.trim()) {
-            this.setStatus("\u26A0\uFE0F Please enter a focus instruction.", "warning");
+            this.setStatus("⚠️ Please enter a focus instruction.", "warning");
             return;
         }
 
@@ -290,11 +346,17 @@ export class YouTubeImportModal extends Modal {
         this.extractResourcesCheckbox.disabled = true;
         this.focusTopicInput.disabled = true;
         this.focusIncludeExtendedCheckbox.disabled = true;
-        this.setStatus("\u23F3 Connecting to backend\u2026", "info");
+        this.whisperLanguageInput.disabled = true;
+        this.setStatus("⏳ Connecting to backend…", "info");
 
         try {
             const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
-            const body: Record<string, string | boolean> = { url, cookie_browser: "safari" };
+            const body: Record<string, string | boolean> = { url };
+            if (source === "youtube") {
+                body.cookie_browser = "safari";
+            } else {
+                body.whisper_language = this.whisperLanguageInput.value.trim() || "auto";
+            }
             if (this.importMode === "extended_summary") {
                 body.extended_summary = true;
                 body.include_transcript = false;
@@ -334,14 +396,14 @@ export class YouTubeImportModal extends Modal {
                 onDetail: (detail) => this.setDetail(detail),
             });
 
-            const file = await this.plugin.createNote(result.filename, result.content);
+            const file = await this.plugin.createNote(result.filename, result.content, result.source);
             if (result.resources.length > 0) {
-                await this.plugin.createResourceStubs(result.resources);
+                await this.plugin.createResourceStubs(result.resources, result.source);
             }
 
             new Notice(`Created: ${file.path}`);
             this.progressBarInner.style.width = "100%";
-            this.setStatus(`\u2713 Done! Note saved as "${file.path}"`, "success");
+            this.setStatus(`✓ Done! Note saved as "${file.path}"`, "success");
             this.setDetail(result.costUsd != null ? `Estimated cost: $${result.costUsd.toFixed(4)}` : "");
 
             await this.app.workspace.openLinkText(file.path, "", false);
@@ -350,8 +412,8 @@ export class YouTubeImportModal extends Modal {
             const closeBtn = this.btnRow.createEl("button", { text: "Ok", cls: "mod-cta" });
             closeBtn.addEventListener("click", () => this.close());
         } catch (error) {
-            console.error("[YT Obsidian]", error);
-            this.setStatus(`\u274C ${error.message}`, "error");
+            console.error("[Media Obsidian]", error);
+            this.setStatus(`❌ ${error.message}`, "error");
             this.setDetail("");
             this.progressWrapper.style.display = "none";
             this.importBtn.disabled = false;
@@ -361,6 +423,7 @@ export class YouTubeImportModal extends Modal {
             this.extractResourcesCheckbox.disabled = false;
             this.focusTopicInput.disabled = false;
             this.focusIncludeExtendedCheckbox.disabled = false;
+            this.whisperLanguageInput.disabled = false;
         }
     }
 

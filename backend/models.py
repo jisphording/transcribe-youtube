@@ -12,6 +12,8 @@ class TranscriptRequest(BaseModel):
     extract_resources: bool = False
     model: str = "claude-haiku-4-5-20251001"
     extended_model: str = "claude-sonnet-4-6"
+    # Podcast-only options
+    whisper_language: str | None = None  # None / "auto" / ISO 639-1 like "en", "de"
 
 
 class CookieUpload(BaseModel):

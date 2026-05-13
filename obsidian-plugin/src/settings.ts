@@ -8,12 +8,18 @@ import type YTObsidianPlugin from "./main";
 
 export interface YTObsidianSettings {
     apiUrl: string;
-    outputFolder: string;
+    outputFolder: string;          // YouTube notes
+    podcastOutputFolder: string;   // Podcast notes
+    whisperLanguage: string;       // "auto" or ISO 639-1 ("en", "de", …)
+    keepWhisperWarm: boolean;      // start whisper-server on plugin load (vs. lazy on first use)
 }
 
 export const DEFAULT_SETTINGS: YTObsidianSettings = {
     apiUrl: "http://localhost:8000",
     outputFolder: "YouTube",
+    podcastOutputFolder: "Podcasts",
+    whisperLanguage: "auto",
+    keepWhisperWarm: false,
 };
 
 export class YTObsidianSettingTab extends PluginSettingTab {
@@ -27,7 +33,7 @@ export class YTObsidianSettingTab extends PluginSettingTab {
     display(): void {
         const { containerEl } = this;
         containerEl.empty();
-        containerEl.createEl("h2", { text: "YouTube to Obsidian" });
+        containerEl.createEl("h2", { text: "Media to Obsidian" });
 
         new Setting(containerEl)
             .setName("Backend API URL")
@@ -42,9 +48,12 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                     })
             );
 
+        // ── YouTube ──────────────────────────────────────────────────────────
+        containerEl.createEl("h3", { text: "YouTube" });
+
         new Setting(containerEl)
-            .setName("Output Folder")
-            .setDesc("Vault folder where notes will be saved (created if it doesn't exist). Leave empty for vault root.")
+            .setName("YouTube notes folder")
+            .setDesc("Vault folder where YouTube notes will be saved (created if missing). Leave empty for vault root.")
             .addText((text) =>
                 text
                     .setPlaceholder("YouTube")
@@ -128,5 +137,115 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                     refreshCookieStatus();
                 })
         );
+
+        // ── Podcasts ─────────────────────────────────────────────────────────
+        containerEl.createEl("h3", { text: "Podcasts" });
+
+        new Setting(containerEl)
+            .setName("Podcast notes folder")
+            .setDesc("Vault folder where podcast notes will be saved. Leave empty for vault root.")
+            .addText((text) =>
+                text
+                    .setPlaceholder("Podcasts")
+                    .setValue(this.plugin.settings.podcastOutputFolder)
+                    .onChange(async (value) => {
+                        this.plugin.settings.podcastOutputFolder = value.trim();
+                        await this.plugin.saveSettings();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Whisper language")
+            .setDesc("Default language for the whisper transcriber. 'auto' lets whisper detect; ISO codes like 'en', 'de', 'fr' work too. Can be overridden per import.")
+            .addText((text) =>
+                text
+                    .setPlaceholder("auto")
+                    .setValue(this.plugin.settings.whisperLanguage)
+                    .onChange(async (value) => {
+                        this.plugin.settings.whisperLanguage = value.trim() || "auto";
+                        await this.plugin.saveSettings();
+                    })
+            );
+
+        const whisperStatusEl = containerEl.createDiv({ cls: "yt-obsidian-whisper-status" });
+        whisperStatusEl.style.fontSize = "12px";
+        whisperStatusEl.style.marginTop = "-4px";
+        whisperStatusEl.style.marginBottom = "12px";
+        whisperStatusEl.style.paddingLeft = "18px";
+
+        const refreshWhisperStatus = async () => {
+            try {
+                const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
+                const resp = await fetch(`${apiUrl}/whisper/status`);
+                const data = await resp.json();
+                if (data.available) {
+                    const idleMin = Math.round((data.idle_timeout_seconds ?? 1800) / 60);
+                    whisperStatusEl.setText(
+                        `whisper-server is running at ${data.server_url} (auto-stops after ${idleMin} min idle).`
+                    );
+                    whisperStatusEl.style.color = "var(--text-success)";
+                } else {
+                    whisperStatusEl.setText(
+                        "whisper-server is stopped. It starts automatically on the first podcast that needs it."
+                    );
+                    whisperStatusEl.style.color = "var(--text-muted)";
+                }
+            } catch {
+                whisperStatusEl.setText("Could not reach backend.");
+                whisperStatusEl.style.color = "var(--text-error)";
+            }
+        };
+        refreshWhisperStatus();
+
+        new Setting(containerEl)
+            .setName("Keep whisper-server warm")
+            .setDesc(
+                "Start whisper-server when Obsidian opens and stop it when Obsidian closes. " +
+                "Off: lazy-start on the first podcast that needs whisper (~3s extra latency on first use). " +
+                "Whichever mode you pick, the server auto-stops after 30 min of inactivity."
+            )
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.keepWhisperWarm)
+                    .onChange(async (value) => {
+                        this.plugin.settings.keepWhisperWarm = value;
+                        await this.plugin.saveSettings();
+                        const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
+                        try {
+                            await fetch(`${apiUrl}/whisper/${value ? "start" : "stop"}`, { method: "POST" });
+                        } catch {
+                            // Best-effort — backend may be down; refresh will show it
+                        }
+                        setTimeout(refreshWhisperStatus, value ? 4000 : 500);
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Start / stop whisper-server now")
+            .setDesc("Manual control. The toggle above sets the auto-start behavior at plugin load.")
+            .addButton((btn) =>
+                btn.setButtonText("Start").onClick(async () => {
+                    const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
+                    try {
+                        await fetch(`${apiUrl}/whisper/start`, { method: "POST" });
+                        new Notice("Starting whisper-server…");
+                    } catch {
+                        new Notice("Could not reach backend.");
+                    }
+                    setTimeout(refreshWhisperStatus, 4000);
+                })
+            )
+            .addButton((btn) =>
+                btn.setButtonText("Stop").onClick(async () => {
+                    const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
+                    try {
+                        await fetch(`${apiUrl}/whisper/stop`, { method: "POST" });
+                        new Notice("Stopped whisper-server.");
+                    } catch {
+                        new Notice("Could not reach backend.");
+                    }
+                    setTimeout(refreshWhisperStatus, 500);
+                })
+            );
     }
 }

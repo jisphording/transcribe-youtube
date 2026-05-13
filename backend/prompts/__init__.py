@@ -38,16 +38,33 @@ PROMPTS = {
 }
 
 
-def get_system_prompt(features: list[str]) -> str:
+SOURCE_TERMS = {
+    "youtube": {
+        "kind": "YouTube video",
+        "noun": "video",
+        "metadata_line": "- Video metadata (title, channel, description)",
+    },
+    "podcast": {
+        "kind": "podcast episode",
+        "noun": "episode",
+        "metadata_line": "- Episode metadata (title, show, description)",
+    },
+}
+
+
+def get_system_prompt(features: list[str], source: str = "youtube") -> str:
     """Build a composite system prompt from selected feature keys.
 
     Always includes 'base'. Additional features add their role preambles,
-    JSON keys, and rules sections to the final prompt.
+    JSON keys, and rules sections to the final prompt. The `source` parameter
+    swaps the wording so the model knows whether the transcript is from a
+    video or a podcast episode.
     """
     if "base" not in features:
         features = ["base"] + features
 
-    # Collect parts from each feature module
+    terms = SOURCE_TERMS.get(source, SOURCE_TERMS["youtube"])
+
     role_parts = []
     all_json_keys = []
     all_rules = []
@@ -62,30 +79,30 @@ def get_system_prompt(features: list[str]) -> str:
         all_json_keys.extend(mod.JSON_KEYS)
         all_rules.append(mod.RULES)
 
-    # Build role line
     role_line = "You are " + ", ".join(role_parts) + "."
 
-    # Build preamble
     preamble = f"""{role_line}
-Your job is to process a raw YouTube transcript and return a clean, well-structured result.
+Your job is to process a raw {terms['kind']} transcript and return a clean, well-structured result.
 
 You will receive:
-- Video metadata (title, channel, description)
+{terms['metadata_line']}
 - Raw transcript text"""
 
-    # Build JSON keys instruction
     key_count = len(all_json_keys)
     keys_section = f"\nYou must return a valid JSON object with exactly {key_count} key{'s' if key_count != 1 else ''}:"
     for i, key_def in enumerate(all_json_keys, 1):
         keys_section += f'\n{i}. "{key_def["key"]}": {key_def["description"]}'
 
-    # Combine rules
-    rules_section = "\n\n".join(all_rules)
+    # Substitute the source noun in rules so "video" → "episode" for podcasts
+    rules_text = "\n\n".join(all_rules)
+    if source == "podcast":
+        rules_text = rules_text.replace("video", terms["noun"])
+        rules_text = rules_text.replace("Video", terms["noun"].capitalize())
 
     return f"""{preamble}
 
 {keys_section}
 
-{rules_section}
+{rules_text}
 
 Return ONLY the JSON object, no other text."""

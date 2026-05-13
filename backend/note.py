@@ -15,6 +15,45 @@ def _demote_headings(text: str) -> str:
     return re.sub(r"^##(?!#)", "###", text, flags=re.MULTILINE)
 
 
+def _yt_view(metadata: dict) -> dict:
+    """Adapt a YouTube metadata dict to the source-agnostic shape used below."""
+    return {
+        "source": "youtube",
+        "title": metadata["title"],
+        "source_label": "Channel",
+        "source_name": metadata["channel"],
+        "source_url": metadata["channel_url"],
+        "url": metadata["url"],
+        "url_label": "Watch on YouTube",
+        "published": metadata.get("upload_date", ""),
+        "duration": metadata.get("duration", ""),
+        "thumbnail_url": metadata.get("thumbnail_url", ""),
+        "tag": "youtube",
+    }
+
+
+def _podcast_view(metadata: dict) -> dict:
+    return {
+        "source": "podcast",
+        "title": metadata["title"],
+        "source_label": "Show",
+        "source_name": metadata["show"],
+        "source_url": metadata.get("show_url", ""),
+        "url": metadata["url"],
+        "url_label": "Listen on Apple Podcasts",
+        "published": metadata.get("published", ""),
+        "duration": metadata.get("duration", ""),
+        "thumbnail_url": metadata.get("thumbnail_url", ""),
+        "tag": "podcast",
+    }
+
+
+def _adapt_metadata(metadata: dict) -> dict:
+    if metadata.get("source") == "podcast":
+        return _podcast_view(metadata)
+    return _yt_view(metadata)
+
+
 def build_obsidian_note(
     metadata: dict,
     summary: str,
@@ -25,32 +64,43 @@ def build_obsidian_note(
     include_transcript: bool = True,
     topics: list[str] | None = None,
     resources: list[dict] | None = None,
+    transcript_source_label: str = "",
 ) -> tuple[str, str]:
-    """Returns (filename, markdown_content)."""
-    filename = slugify(metadata["title"]) + ".md"
+    """Returns (filename, markdown_content). Works for YouTube and podcast metadata."""
+    view = _adapt_metadata(metadata)
+
+    filename = slugify(view["title"]) + ".md"
 
     thumbnail_line = ""
-    if metadata["thumbnail_url"]:
-        thumbnail_line = f'![thumbnail]({metadata["thumbnail_url"]})\n\n'
+    if view["thumbnail_url"]:
+        thumbnail_line = f'![thumbnail]({view["thumbnail_url"]})\n\n'
 
     topics_yaml = ""
     if topics:
         topics_yaml = "topics:\n" + "\n".join(f"  - {t}" for t in topics) + "\n"
 
-    frontmatter = (
-        "---\n"
-        f'title: "{metadata["title"]}"\n'
-        f'channel: "{metadata["channel"]}"\n'
-        f'channel_url: "{metadata["channel_url"]}"\n'
-        f'url: "{metadata["url"]}"\n'
-        f'published: "{metadata["upload_date"]}"\n'
-        f'duration: "{metadata["duration"]}"\n'
-        + topics_yaml
-        + "tags:\n"
-        "  - youtube\n"
-        "  - transcript\n"
-        "---\n\n"
-    )
+    source_field_label = view["source_label"].lower()  # "channel" or "show"
+
+    # Source-specific frontmatter fields
+    fm_lines = [
+        "---",
+        f'title: "{view["title"]}"',
+        f'{source_field_label}: "{view["source_name"]}"',
+    ]
+    if view["source_url"]:
+        fm_lines.append(f'{source_field_label}_url: "{view["source_url"]}"')
+    fm_lines.extend([
+        f'url: "{view["url"]}"',
+        f'published: "{view["published"]}"',
+        f'duration: "{view["duration"]}"',
+    ])
+    if topics_yaml:
+        fm_lines.append(topics_yaml.rstrip())
+    fm_lines.append("tags:")
+    fm_lines.append(f"  - {view['tag']}")
+    fm_lines.append("  - transcript")
+    fm_lines.append("---")
+    frontmatter = "\n".join(fm_lines) + "\n\n"
 
     resources_section = ""
     if resources:
@@ -80,22 +130,31 @@ def build_obsidian_note(
             + "\n\n---\n\n"
         )
 
+    transcript_heading = "## Transcript"
+    if transcript_source_label:
+        transcript_heading += f" *(via {transcript_source_label})*"
     transcript_section = ""
     if include_transcript and transcript_md.strip():
         transcript_section = (
-            "## Transcript\n\n"
+            transcript_heading + "\n\n"
             + _demote_headings(transcript_md.strip())
             + "\n"
         )
 
+    header_quote = (
+        f"> **{view['source_label']}:** [{view['source_name']}]({view['source_url']})  \n"
+        if view['source_url']
+        else f"> **{view['source_label']}:** {view['source_name']}  \n"
+    )
+
     note = (
         frontmatter
         + thumbnail_line
-        + f"# {metadata['title']}\n\n"
-        + f"> **Channel:** [{metadata['channel']}]({metadata['channel_url']})  \n"
-        + f"> **Published:** {metadata['upload_date']}  \n"
-        + f"> **Duration:** {metadata['duration']}  \n"
-        + f"> **Link:** [Watch on YouTube]({metadata['url']})\n\n"
+        + f"# {view['title']}\n\n"
+        + header_quote
+        + f"> **Published:** {view['published']}  \n"
+        + f"> **Duration:** {view['duration']}  \n"
+        + f"> **Link:** [{view['url_label']}]({view['url']})\n\n"
         + "---\n\n"
         + "## Summary\n\n"
         + summary.strip()

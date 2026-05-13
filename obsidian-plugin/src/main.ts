@@ -1,5 +1,5 @@
 import { Plugin, TFile, normalizePath } from "obsidian";
-import type { SSEResource } from "./sse-handler";
+import type { SSEResource, SSESource } from "./sse-handler";
 import { YTObsidianSettings, DEFAULT_SETTINGS, YTObsidianSettingTab } from "./settings";
 import { YouTubeImportModal } from "./import-modal";
 
@@ -10,16 +10,30 @@ export default class YTObsidianPlugin extends Plugin {
         await this.loadSettings();
 
         this.addCommand({
-            id: "import-youtube-video",
-            name: "Import YouTube Video as Note",
+            id: "import-media",
+            name: "Import Media (YouTube or Podcast) as Note",
             callback: () => new YouTubeImportModal(this.app, this).open(),
         });
 
-        this.addRibbonIcon("youtube", "Import YouTube Video", () => {
+        this.addRibbonIcon("file-audio", "Import Media", () => {
             new YouTubeImportModal(this.app, this).open();
         });
 
         this.addSettingTab(new YTObsidianSettingTab(this.app, this));
+
+        if (this.settings.keepWhisperWarm) {
+            this.fireWhisperLifecycle("start");
+        }
+    }
+
+    async onunload() {
+        this.fireWhisperLifecycle("stop");
+    }
+
+    private fireWhisperLifecycle(action: "start" | "stop") {
+        const apiUrl = this.settings.apiUrl.replace(/\/$/, "");
+        // Best-effort, fire-and-forget — don't block Obsidian's lifecycle on a network call.
+        fetch(`${apiUrl}/whisper/${action}`, { method: "POST" }).catch(() => {});
     }
 
     async loadSettings() {
@@ -30,8 +44,14 @@ export default class YTObsidianPlugin extends Plugin {
         await this.saveData(this.settings);
     }
 
-    async createNote(filename: string, content: string): Promise<TFile> {
-        const folder = this.settings.outputFolder.trim();
+    folderForSource(source: SSESource): string {
+        return source === "podcast"
+            ? this.settings.podcastOutputFolder.trim()
+            : this.settings.outputFolder.trim();
+    }
+
+    async createNote(filename: string, content: string, source: SSESource): Promise<TFile> {
+        const folder = this.folderForSource(source);
 
         if (folder && !this.app.vault.getAbstractFileByPath(folder)) {
             await this.app.vault.createFolder(folder);
@@ -48,8 +68,8 @@ export default class YTObsidianPlugin extends Plugin {
         return await this.app.vault.create(finalPath, content);
     }
 
-    async createResourceStubs(resources: SSEResource[]): Promise<void> {
-        const folder = this.settings.outputFolder.trim();
+    async createResourceStubs(resources: SSEResource[], source: SSESource): Promise<void> {
+        const folder = this.folderForSource(source);
         const allFiles = this.app.vault.getFiles();
         const folderPrefix = folder ? folder + "/" : "";
 
@@ -57,7 +77,6 @@ export default class YTObsidianPlugin extends Plugin {
             const name = resource.name.trim();
             if (!name) continue;
 
-            // Skip if a file with this name already exists in the transcript folder or subfolders
             const alreadyExists = allFiles.some(
                 (f) =>
                     f.basename.toLowerCase() === name.toLowerCase() &&
