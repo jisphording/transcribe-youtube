@@ -100,24 +100,33 @@ def fetch_article(url: str) -> tuple[dict, str]:
     """
     html, final_url = _fetch_html(url)
 
-    text = trafilatura.extract(
-        html,
-        url=final_url,
-        output_format="txt",
-        include_comments=False,
-        include_images=False,
-        include_links=False,
-        include_tables=True,
-        include_formatting=False,
-        deduplicate=True,
-        favor_precision=True,
-    )
+    # Precision mode gives the cleanest text on classic articles but drops most of
+    # sectioned layouts (case studies, landing-style posts) — fall back if too short.
+    text, word_count = "", 0
+    for mode in ({"favor_precision": True}, {}, {"favor_recall": True}):
+        candidate = trafilatura.extract(
+            html,
+            url=final_url,
+            output_format="txt",
+            include_comments=False,
+            include_images=False,
+            include_links=False,
+            include_tables=True,
+            include_formatting=False,
+            deduplicate=True,
+            **mode,
+        )
+        candidate = _compact(candidate or "")
+        candidate_words = len(candidate.split())
+        if candidate_words > word_count:
+            text, word_count = candidate, candidate_words
+        if word_count >= MIN_WORDS:
+            break
+
     if not text:
         raise WebFetchError(
             "Could not find any article text on this page. It may be rendered with JavaScript, paywalled, or not an article."
         )
-    text = _compact(text)
-    word_count = len(text.split())
     if word_count < MIN_WORDS:
         raise WebFetchError(
             f"Only {word_count} words of main text found — the page is probably paywalled, behind a login/cookie wall, or rendered with JavaScript."
