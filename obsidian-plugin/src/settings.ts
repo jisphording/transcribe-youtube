@@ -8,18 +8,14 @@ import type YTObsidianPlugin from "./main";
 
 export interface YTObsidianSettings {
     apiUrl: string;
-    outputFolder: string;          // YouTube notes
-    podcastOutputFolder: string;   // Podcast notes
-    webOutputFolder: string;       // Web article notes
-    whisperLanguage: string;       // "auto" or ISO 639-1 ("en", "de", …)
-    keepWhisperWarm: boolean;      // start whisper-server on plugin load (vs. lazy on first use)
+    mediaTranscriptsFolder: string; // Root folder for all transcripts (YouTube, Podcasts, Articles subfolders)
+    whisperLanguage: string;        // "auto" or ISO 639-1 ("en", "de", …)
+    keepWhisperWarm: boolean;       // start whisper-server on plugin load (vs. lazy on first use)
 }
 
 export const DEFAULT_SETTINGS: YTObsidianSettings = {
-    apiUrl: "http://localhost:8000",
-    outputFolder: "YouTube",
-    podcastOutputFolder: "Podcasts",
-    webOutputFolder: "Articles",
+    apiUrl: "http://127.0.0.1:8000",
+    mediaTranscriptsFolder: "Media Transcripts",
     whisperLanguage: "auto",
     keepWhisperWarm: false,
 };
@@ -42,7 +38,7 @@ export class YTObsidianSettingTab extends PluginSettingTab {
             .setDesc("URL of the local Python backend. Usually the default.")
             .addText((text) =>
                 text
-                    .setPlaceholder("http://localhost:8000")
+                    .setPlaceholder("http://127.0.0.1:8000")
                     .setValue(this.plugin.settings.apiUrl)
                     .onChange(async (value) => {
                         this.plugin.settings.apiUrl = value.trim();
@@ -50,21 +46,28 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                     })
             );
 
-        // ── YouTube ──────────────────────────────────────────────────────────
-        containerEl.createEl("h3", { text: "YouTube" });
+        // ── Media Transcripts ────────────────────────────────────────────────
+        containerEl.createEl("h3", { text: "Media Transcripts (Root Folder)" });
 
         new Setting(containerEl)
-            .setName("YouTube notes folder")
-            .setDesc("Vault folder where YouTube notes will be saved (created if missing). Leave empty for vault root.")
+            .setName("Media Transcripts folder")
+            .setDesc("Root vault folder where all transcripts will be organized. YouTube, Podcasts, and Articles subfolders will be created automatically. Leave empty for vault root.")
             .addText((text) =>
                 text
-                    .setPlaceholder("YouTube")
-                    .setValue(this.plugin.settings.outputFolder)
+                    .setPlaceholder("Media Transcripts")
+                    .setValue(this.plugin.settings.mediaTranscriptsFolder)
                     .onChange(async (value) => {
-                        this.plugin.settings.outputFolder = value.trim();
+                        this.plugin.settings.mediaTranscriptsFolder = value.trim();
                         await this.plugin.saveSettings();
                     })
             );
+
+        containerEl.createEl("p", { text: "Subfolder structure:" }).style.marginTop = "12px";
+        const subfolderList = containerEl.createEl("ul");
+        subfolderList.createEl("li", { text: "YouTube — YouTube video transcripts" });
+        subfolderList.createEl("li", { text: "Podcasts — Podcast episode transcripts" });
+        subfolderList.createEl("li", { text: "Articles — Web article summaries" });
+        subfolderList.createEl("li", { text: "Mentioned_Resources — Extracted resources/tools/products (if enabled)" });
 
         const cookieSetting = new Setting(containerEl)
             .setName("cookies.txt (fallback only)")
@@ -140,37 +143,8 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                 })
         );
 
-        // ── Web articles ─────────────────────────────────────────────────────
-        containerEl.createEl("h3", { text: "Web articles" });
-
-        new Setting(containerEl)
-            .setName("Article notes folder")
-            .setDesc("Vault folder where web article summaries will be saved. Leave empty for vault root.")
-            .addText((text) =>
-                text
-                    .setPlaceholder("Articles")
-                    .setValue(this.plugin.settings.webOutputFolder)
-                    .onChange(async (value) => {
-                        this.plugin.settings.webOutputFolder = value.trim();
-                        await this.plugin.saveSettings();
-                    })
-            );
-
-        // ── Podcasts ─────────────────────────────────────────────────────────
-        containerEl.createEl("h3", { text: "Podcasts" });
-
-        new Setting(containerEl)
-            .setName("Podcast notes folder")
-            .setDesc("Vault folder where podcast notes will be saved. Leave empty for vault root.")
-            .addText((text) =>
-                text
-                    .setPlaceholder("Podcasts")
-                    .setValue(this.plugin.settings.podcastOutputFolder)
-                    .onChange(async (value) => {
-                        this.plugin.settings.podcastOutputFolder = value.trim();
-                        await this.plugin.saveSettings();
-                    })
-            );
+        // ── Podcast Settings ─────────────────────────────────────────────────
+        containerEl.createEl("h3", { text: "Podcast Settings" });
 
         new Setting(containerEl)
             .setName("Whisper language")

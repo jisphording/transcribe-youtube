@@ -343,6 +343,7 @@ export class YouTubeImportModal extends Modal {
             }
         }
         this.skipDuplicateCheck = false;
+        this.skipDuplicateCheck = false;
 
         if (this.importMode === "focus_topic" && !this.focusTopicInput.value.trim()) {
             this.setStatus("⚠️ Please enter a focus instruction.", "warning");

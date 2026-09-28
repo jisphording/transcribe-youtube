@@ -46,7 +46,15 @@ export default class YTObsidianPlugin extends Plugin {
     }
 
     async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        const saved = await this.loadData();
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+
+        // Migrate old settings (outputFolder, podcastOutputFolder, webOutputFolder) to new structure
+        if (saved && (saved.outputFolder || saved.podcastOutputFolder || saved.webOutputFolder)) {
+            const oldBase = saved.outputFolder || "YouTube";
+            this.settings.mediaTranscriptsFolder = oldBase.replace(/\/YouTube$/, "") || DEFAULT_SETTINGS.mediaTranscriptsFolder;
+            await this.saveSettings();
+        }
     }
 
     async saveSettings() {
@@ -54,9 +62,19 @@ export default class YTObsidianPlugin extends Plugin {
     }
 
     folderForSource(source: SSESource): string {
-        if (source === "podcast") return this.settings.podcastOutputFolder.trim();
-        if (source === "web") return this.settings.webOutputFolder.trim();
-        return this.settings.outputFolder.trim();
+        const base = this.settings.mediaTranscriptsFolder.trim();
+        if (source === "podcast") {
+            return base ? `${base}/Podcasts` : "Podcasts";
+        }
+        if (source === "web") {
+            return base ? `${base}/Articles` : "Articles";
+        }
+        return base ? `${base}/YouTube` : "YouTube";
+    }
+
+    resourceFolder(): string {
+        const base = this.settings.mediaTranscriptsFolder.trim();
+        return base ? `${base}/Mentioned_Resources` : "Mentioned_Resources";
     }
 
     async createNote(filename: string, content: string, source: SSESource): Promise<TFile> {
@@ -78,8 +96,13 @@ export default class YTObsidianPlugin extends Plugin {
     }
 
     async createResourceStubs(resources: SSEResource[], source: SSESource): Promise<void> {
-        const folder = this.folderForSource(source);
+        const folder = this.resourceFolder();
         const allFiles = this.app.vault.getFiles();
+
+        if (folder && !this.app.vault.getAbstractFileByPath(folder)) {
+            await this.app.vault.createFolder(folder);
+        }
+
         const folderPrefix = folder ? folder + "/" : "";
 
         for (const resource of resources) {
