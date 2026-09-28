@@ -328,11 +328,21 @@ The new note opens automatically. Videos over ~90 minutes start getting unreliab
 | Setting | Default | Description |
 |---|---|---|
 | Backend API URL | `http://localhost:8000` | Where the Python server listens |
-| YouTube notes folder | `YouTube` | Vault folder for new YouTube notes (auto-created) |
-| Podcast notes folder | `Podcasts` | Vault folder for new podcast notes (auto-created) |
-| Article notes folder | `Articles` | Vault folder for new web article summaries (auto-created) |
+| Use a parent folder | on | On: all folders live inside the parent folder. Off: they are sibling folders in the vault root |
+| Parent folder | `MEDIA_Transcripts` | Parent folder for everything the plugin creates (only when "Use a parent folder" is on) |
+| YouTube / Podcasts / Articles / Mentioned resources folder | `YouTube` / `Podcasts` / `Articles` / `Mentioned_Resources` | Folder name per source, plus the shared resource-stub folder |
 | Whisper language | `auto` | Default language hint for whisper.cpp; can be overridden per import |
 | Cookie file | — | Netscape `cookies.txt` upload for when the browser path isn't available (YouTube only) |
+
+With the defaults, all generated files live below the parent folder (folders are auto-created):
+
+```
+MEDIA_Transcripts/
+├── YouTube/               ← YouTube video notes
+├── Podcasts/              ← podcast episode notes
+├── Articles/              ← web article summaries
+└── Mentioned_Resources/   ← resource stubs, shared by all three sources
+```
 
 The settings tab also shows a live indicator for whether the local whisper-server is reachable.
 
@@ -509,7 +519,7 @@ transcribe-youtube/
 ├── obsidian-plugin/
 │   ├── src/
 │   │   ├── main.ts          # plugin lifecycle + source-aware note creation
-│   │   ├── settings.ts      # YouTube + Podcasts folders + whisper language
+│   │   ├── settings.ts      # folder layout (parent + per-source names) + whisper language
 │   │   ├── import-modal.ts  # one modal, auto-detects YouTube vs Apple Podcasts
 │   │   ├── sse-handler.ts   # SSE event → callbacks
 │   │   └── url-utils.ts     # detectSource(), extractVideoId(), Apple ID extractors

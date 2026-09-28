@@ -409,7 +409,7 @@ export class YouTubeImportModal extends Modal {
 
             const file = await this.plugin.createNote(result.filename, result.content, result.source);
             if (result.resources.length > 0) {
-                await this.plugin.createResourceStubs(result.resources, result.source);
+                await this.plugin.createResourceStubs(result.resources);
             }
 
             new Notice(`Created: ${file.path}`);

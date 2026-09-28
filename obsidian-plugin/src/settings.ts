@@ -8,14 +8,26 @@ import type YTObsidianPlugin from "./main";
 
 export interface YTObsidianSettings {
     apiUrl: string;
-    mediaTranscriptsFolder: string; // Root folder for all transcripts (YouTube, Podcasts, Articles subfolders)
+    useParentFolder: boolean;       // true: folders below mediaTranscriptsFolder; false: siblings in vault root
+    mediaTranscriptsFolder: string; // Parent folder (only used when useParentFolder is on)
+    youtubeFolder: string;
+    podcastFolder: string;
+    articleFolder: string;
+    resourcesFolder: string;        // Mentioned_Resources, shared by all sources
     whisperLanguage: string;        // "auto" or ISO 639-1 ("en", "de", …)
     keepWhisperWarm: boolean;       // start whisper-server on plugin load (vs. lazy on first use)
 }
 
+export type FolderKey = "youtubeFolder" | "podcastFolder" | "articleFolder" | "resourcesFolder";
+
 export const DEFAULT_SETTINGS: YTObsidianSettings = {
     apiUrl: "http://127.0.0.1:8000",
-    mediaTranscriptsFolder: "Media Transcripts",
+    useParentFolder: true,
+    mediaTranscriptsFolder: "MEDIA_Transcripts",
+    youtubeFolder: "YouTube",
+    podcastFolder: "Podcasts",
+    articleFolder: "Articles",
+    resourcesFolder: "Mentioned_Resources",
     whisperLanguage: "auto",
     keepWhisperWarm: false,
 };
@@ -46,28 +58,57 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                     })
             );
 
-        // ── Media Transcripts ────────────────────────────────────────────────
-        containerEl.createEl("h3", { text: "Media Transcripts (Root Folder)" });
+        // ── Folders ──────────────────────────────────────────────────────────
+        containerEl.createEl("h3", { text: "Folders" });
+
+        const useParent = this.plugin.settings.useParentFolder;
 
         new Setting(containerEl)
-            .setName("Media Transcripts folder")
-            .setDesc("Root vault folder where all transcripts will be organized. YouTube, Podcasts, and Articles subfolders will be created automatically. Leave empty for vault root.")
-            .addText((text) =>
-                text
-                    .setPlaceholder("Media Transcripts")
-                    .setValue(this.plugin.settings.mediaTranscriptsFolder)
-                    .onChange(async (value) => {
-                        this.plugin.settings.mediaTranscriptsFolder = value.trim();
-                        await this.plugin.saveSettings();
-                    })
+            .setName("Use a parent folder")
+            .setDesc("On: all folders below live inside one parent folder. Off: they are created as sibling folders in the vault root.")
+            .addToggle((toggle) =>
+                toggle.setValue(useParent).onChange(async (value) => {
+                    this.plugin.settings.useParentFolder = value;
+                    await this.plugin.saveSettings();
+                    this.display();
+                })
             );
 
-        containerEl.createEl("p", { text: "Subfolder structure:" }).style.marginTop = "12px";
-        const subfolderList = containerEl.createEl("ul");
-        subfolderList.createEl("li", { text: "YouTube — YouTube video transcripts" });
-        subfolderList.createEl("li", { text: "Podcasts — Podcast episode transcripts" });
-        subfolderList.createEl("li", { text: "Articles — Web article summaries" });
-        subfolderList.createEl("li", { text: "Mentioned_Resources — Extracted resources/tools/products (if enabled)" });
+        if (useParent) {
+            new Setting(containerEl)
+                .setName("Parent folder")
+                .setDesc(`Parent folder for everything this plugin creates. Empty falls back to "${DEFAULT_SETTINGS.mediaTranscriptsFolder}".`)
+                .addText((text) =>
+                    text
+                        .setPlaceholder(DEFAULT_SETTINGS.mediaTranscriptsFolder)
+                        .setValue(this.plugin.settings.mediaTranscriptsFolder)
+                        .onChange(async (value) => {
+                            this.plugin.settings.mediaTranscriptsFolder = value.trim();
+                            await this.plugin.saveSettings();
+                        })
+                );
+        }
+
+        const folderSettings: [FolderKey, string, string][] = [
+            ["youtubeFolder", "YouTube folder", "YouTube video transcripts."],
+            ["podcastFolder", "Podcasts folder", "Podcast episode transcripts."],
+            ["articleFolder", "Articles folder", "Web article summaries."],
+            ["resourcesFolder", "Mentioned resources folder", "Extracted tools/products/services, shared by all sources."],
+        ];
+        for (const [key, name, desc] of folderSettings) {
+            new Setting(containerEl)
+                .setName(name)
+                .setDesc(`${desc} ${useParent ? "Inside the parent folder." : "In the vault root."} Empty falls back to "${DEFAULT_SETTINGS[key]}".`)
+                .addText((text) =>
+                    text
+                        .setPlaceholder(DEFAULT_SETTINGS[key])
+                        .setValue(this.plugin.settings[key])
+                        .onChange(async (value) => {
+                            this.plugin.settings[key] = value.trim();
+                            await this.plugin.saveSettings();
+                        })
+                );
+        }
 
         const cookieSetting = new Setting(containerEl)
             .setName("cookies.txt (fallback only)")

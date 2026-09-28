@@ -54,7 +54,7 @@ Modular TypeScript plugin with one file per concern:
 | File | Responsibility | Depends on |
 |---|---|---|
 | `main.ts` | `YTObsidianPlugin` class — plugin lifecycle, settings persistence, source-aware note creation | `settings`, `import-modal`, `sse-handler` (type) |
-| `settings.ts` | `YTObsidianSettings` interface, `DEFAULT_SETTINGS`, `YTObsidianSettingTab` (settings UI: separate folders for YouTube/Podcasts, whisper language, cookie management) | `main` (type only) |
+| `settings.ts` | `YTObsidianSettings` interface, `DEFAULT_SETTINGS`, `YTObsidianSettingTab` (settings UI: parent-folder toggle + name, per-source folder names, whisper language, cookie management) | `main` (type only) |
 | `import-modal.ts` | `YouTubeImportModal` — single modal that auto-detects source, adapts UI, builds the request, displays progress | `main` (type only), `url-utils`, `sse-handler` |
 | `sse-handler.ts` | `processSSEStream()` — SSE parsing + dispatch via callbacks. Knows about all stages (incl. `transcript_rss`, `transcript_whisper_download`, `transcript_whisper_running`) | — |
 | `url-utils.ts` | `detectSource()` (YouTube vs Apple Podcasts vs web vs null), `extractVideoId()`, `extractAppleEpisodeId/ShowId()`, `cleanWebUrl()` (mirror of `web.clean_url`), `findExistingNote()` | — |
@@ -63,6 +63,7 @@ Modular TypeScript plugin with one file per concern:
 - `sse-handler.ts` and `url-utils.ts` are pure modules with no plugin dependencies — they must not import from `main`, `settings`, or `import-modal`.
 - `settings.ts` and `import-modal.ts` import `main.ts` only as a type (`import type`) to avoid circular runtime dependencies.
 - SSE event stage handling lives in `sse-handler.ts`. When adding new SSE stages, update the switch statement there (not in `import-modal.ts`).
+- Folder layout is configurable: `youtubeFolder`, `podcastFolder`, `articleFolder` and the shared `resourcesFolder` (defaults `YouTube`, `Podcasts`, `Articles`, `Mentioned_Resources`). With `useParentFolder` on (default) they live below `mediaTranscriptsFolder` (default `MEDIA_Transcripts`); off, they are siblings in the vault root. Empty names fall back to the defaults. Resolve paths only via `plugin.folderForSource()` / `plugin.resourceFolder()`.
 - The plugin id stays `youtube-to-obsidian` (no breakage in existing vaults). The display name is "Media to Obsidian".
 
 ### Communication

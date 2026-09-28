@@ -1,6 +1,6 @@
 import { Plugin, TFile, addIcon, normalizePath } from "obsidian";
 import type { SSEResource, SSESource } from "./sse-handler";
-import { YTObsidianSettings, DEFAULT_SETTINGS, YTObsidianSettingTab } from "./settings";
+import { YTObsidianSettings, DEFAULT_SETTINGS, YTObsidianSettingTab, FolderKey } from "./settings";
 import { YouTubeImportModal } from "./import-modal";
 
 // Bundled as SVG so the ribbon icon never depends on Obsidian's Lucide version
@@ -46,45 +46,50 @@ export default class YTObsidianPlugin extends Plugin {
     }
 
     async loadSettings() {
-        const saved = await this.loadData();
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+        const saved = (await this.loadData()) ?? {};
+        const legacyKeys = ["outputFolder", "podcastOutputFolder", "webOutputFolder"];
+        const hasLegacy = legacyKeys.some((k) => k in saved);
+        const isOldDefault = saved.mediaTranscriptsFolder === "Media Transcripts";
+        for (const k of legacyKeys) delete saved[k];
+        if (hasLegacy || isOldDefault) delete saved.mediaTranscriptsFolder;
 
-        // Migrate old settings (outputFolder, podcastOutputFolder, webOutputFolder) to new structure
-        if (saved && (saved.outputFolder || saved.podcastOutputFolder || saved.webOutputFolder)) {
-            const oldBase = saved.outputFolder || "YouTube";
-            this.settings.mediaTranscriptsFolder = oldBase.replace(/\/YouTube$/, "") || DEFAULT_SETTINGS.mediaTranscriptsFolder;
-            await this.saveSettings();
-        }
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+        if (hasLegacy || isOldDefault) await this.saveSettings();
     }
 
     async saveSettings() {
         await this.saveData(this.settings);
     }
 
-    folderForSource(source: SSESource): string {
-        const base = this.settings.mediaTranscriptsFolder.trim();
-        if (source === "podcast") {
-            return base ? `${base}/Podcasts` : "Podcasts";
-        }
-        if (source === "web") {
-            return base ? `${base}/Articles` : "Articles";
-        }
-        return base ? `${base}/YouTube` : "YouTube";
+    // With useParentFolder (default) every folder lives below one root folder;
+    // otherwise the folders are siblings in the vault root.
+    private resolveFolder(key: FolderKey): string {
+        const name = this.settings[key].trim() || DEFAULT_SETTINGS[key];
+        if (!this.settings.useParentFolder) return normalizePath(name);
+        const root = this.settings.mediaTranscriptsFolder.trim() || DEFAULT_SETTINGS.mediaTranscriptsFolder;
+        return normalizePath(`${root}/${name}`);
     }
 
+    folderForSource(source: SSESource): string {
+        return this.resolveFolder(source === "podcast" ? "podcastFolder" : source === "web" ? "articleFolder" : "youtubeFolder");
+    }
+
+    // Shared by all sources so the same tool/product gets a single stub.
     resourceFolder(): string {
-        const base = this.settings.mediaTranscriptsFolder.trim();
-        return base ? `${base}/Mentioned_Resources` : "Mentioned_Resources";
+        return this.resolveFolder("resourcesFolder");
+    }
+
+    private async ensureFolder(folder: string): Promise<void> {
+        if (!this.app.vault.getAbstractFileByPath(folder)) {
+            await this.app.vault.createFolder(folder);
+        }
     }
 
     async createNote(filename: string, content: string, source: SSESource): Promise<TFile> {
         const folder = this.folderForSource(source);
+        await this.ensureFolder(folder);
 
-        if (folder && !this.app.vault.getAbstractFileByPath(folder)) {
-            await this.app.vault.createFolder(folder);
-        }
-
-        const fullPath = normalizePath(folder ? `${folder}/${filename}` : filename);
+        const fullPath = normalizePath(`${folder}/${filename}`);
 
         let finalPath = fullPath;
         if (this.app.vault.getAbstractFileByPath(finalPath)) {
@@ -95,28 +100,23 @@ export default class YTObsidianPlugin extends Plugin {
         return await this.app.vault.create(finalPath, content);
     }
 
-    async createResourceStubs(resources: SSEResource[], source: SSESource): Promise<void> {
+    async createResourceStubs(resources: SSEResource[]): Promise<void> {
         const folder = this.resourceFolder();
+        await this.ensureFolder(folder);
+
+        const folderPrefix = folder + "/";
         const allFiles = this.app.vault.getFiles();
-
-        if (folder && !this.app.vault.getAbstractFileByPath(folder)) {
-            await this.app.vault.createFolder(folder);
-        }
-
-        const folderPrefix = folder ? folder + "/" : "";
 
         for (const resource of resources) {
             const name = resource.name.trim();
             if (!name) continue;
 
             const alreadyExists = allFiles.some(
-                (f) =>
-                    f.basename.toLowerCase() === name.toLowerCase() &&
-                    (folderPrefix === "" || f.path.startsWith(folderPrefix))
+                (f) => f.basename.toLowerCase() === name.toLowerCase() && f.path.startsWith(folderPrefix)
             );
             if (alreadyExists) continue;
 
-            const stubPath = normalizePath(folderPrefix ? `${folder}/${name}.md` : `${name}.md`);
+            const stubPath = normalizePath(`${folder}/${name}.md`);
             if (!this.app.vault.getAbstractFileByPath(stubPath)) {
                 await this.app.vault.create(stubPath, "");
             }
