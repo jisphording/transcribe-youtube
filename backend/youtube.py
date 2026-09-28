@@ -14,6 +14,10 @@ from cookies import COOKIE_FILE_PATH
 VALID_BROWSERS = {"chrome", "firefox", "safari", "edge", "brave"}
 
 
+def is_youtube_url(url: str) -> bool:
+    return bool(re.search(r"(youtube\.com/|youtu\.be/)", url, re.I))
+
+
 def _resolve_cookie_path(cookie_file: str | None) -> str | None:
     if cookie_file and os.path.isfile(cookie_file):
         return cookie_file

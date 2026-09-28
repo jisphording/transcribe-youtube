@@ -1,8 +1,8 @@
-# CLAUDE.md — Media to Obsidian (YouTube + Podcasts)
+# CLAUDE.md — Media to Obsidian (YouTube + Podcasts + Web Articles)
 
 ## Project Overview
 
-A full-stack app that imports YouTube videos **and** Apple Podcasts episodes into Obsidian as structured notes. The plugin auto-detects the source from the pasted URL, fetches transcripts (RSS / YouTube CC / whisper.cpp), processes them with Claude AI (summary + cleaned transcript + topics + optional resources/extended/focused summaries), and creates formatted markdown notes.
+A full-stack app that imports YouTube videos, Apple Podcasts episodes **and** web articles into Obsidian as structured notes. The plugin auto-detects the source from the pasted URL, fetches transcripts (RSS / YouTube CC / whisper.cpp) or the article's main text, processes them with Claude AI (summary + cleaned transcript + topics + optional resources/extended/focused summaries; articles get summary + key points + knowledge-base frontmatter instead of a transcript), and creates formatted markdown notes.
 
 - **Frontend:** TypeScript Obsidian plugin (`obsidian-plugin/`)
 - **Backend:** Python FastAPI with SSE streaming (`backend/`)
@@ -30,20 +30,22 @@ Each file has a single responsibility. Do not merge concerns across modules.
 | `youtube.py` | Video ID extraction, metadata (yt-dlp), transcript fetching (youtube-transcript-api + yt-dlp fallback) | `cookies` |
 | `podcast.py` | Apple URL parsing, iTunes lookup, RSS fetch (`feedparser`), episode matching, RSS transcript extractor (Podcasting 2.0) | — |
 | `whisper.py` | Local whisper-server HTTP client. Downloads audio → POSTs to `whisper-server` → returns transcript | — |
+| `web.py` | Web article fetch (HTML only — no images/scripts/linked pages), accessibility checks, main-text + metadata extraction via `trafilatura`, URL cleaning | — |
 | `claude.py` | Claude API streaming, response parsing, model constants | — |
-| `note.py` | Source-agnostic Obsidian markdown note assembly (YouTube + podcast variants) | — |
+| `note.py` | Source-agnostic Obsidian markdown note assembly (YouTube + podcast variants, separate web article layout) | — |
 | `cookies.py` | Cookie file persistence (save/delete/check) | — |
 | `prompts/__init__.py` | Source-aware prompt registry and composition engine | prompt feature modules |
 | `prompts/base.py` | Base prompt: transcript cleaning + short summary + topics | — |
+| `prompts/article.py` | Base prompt for `source="web"` (replaces `base`): tldr, summary, key points, topics, content type, useful-for. No transcript key — articles are never reproduced | — |
 | `prompts/extended.py` | Extended summary prompt: topic-by-topic editorial rewrite | — |
 | `prompts/focus.py` | Focus topic prompt: deep-dive on a user-supplied topic | — |
 | `prompts/resources.py` | Resources prompt: extract products/tools/services as wiki-link stubs | — |
 
 **Rules:**
-- `youtube.py`, `podcast.py`, `whisper.py`, `claude.py`, `note.py`, and `cookies.py` must NOT import from each other. They are independent modules orchestrated only by `main.py`.
+- `youtube.py`, `podcast.py`, `whisper.py`, `web.py`, `claude.py`, `note.py`, and `cookies.py` must NOT import from each other. They are independent modules orchestrated only by `main.py`.
 - `models.py` contains only Pydantic models — no logic.
 - Prompt modules expose only `ROLE_PREAMBLE`, `JSON_KEYS`, and `RULES` — no functions.
-- The prompt composer (`prompts.get_system_prompt`) takes a `source` argument (`"youtube"` or `"podcast"`) so the same feature flags work for both media types — the wording adapts.
+- The prompt composer (`prompts.get_system_prompt`) takes a `source` argument (`"youtube"`, `"podcast"` or `"web"`) so the same feature flags work for all sources — the wording adapts. For `"web"` it swaps `base` for `article`.
 
 ### Frontend (`obsidian-plugin/src/`)
 
@@ -55,7 +57,7 @@ Modular TypeScript plugin with one file per concern:
 | `settings.ts` | `YTObsidianSettings` interface, `DEFAULT_SETTINGS`, `YTObsidianSettingTab` (settings UI: separate folders for YouTube/Podcasts, whisper language, cookie management) | `main` (type only) |
 | `import-modal.ts` | `YouTubeImportModal` — single modal that auto-detects source, adapts UI, builds the request, displays progress | `main` (type only), `url-utils`, `sse-handler` |
 | `sse-handler.ts` | `processSSEStream()` — SSE parsing + dispatch via callbacks. Knows about all stages (incl. `transcript_rss`, `transcript_whisper_download`, `transcript_whisper_running`) | — |
-| `url-utils.ts` | `detectSource()` (YouTube vs Apple Podcasts vs null), `extractVideoId()`, `extractAppleEpisodeId/ShowId()`, `findExistingNote()` | — |
+| `url-utils.ts` | `detectSource()` (YouTube vs Apple Podcasts vs web vs null), `extractVideoId()`, `extractAppleEpisodeId/ShowId()`, `cleanWebUrl()` (mirror of `web.clean_url`), `findExistingNote()` | — |
 
 **Rules:**
 - `sse-handler.ts` and `url-utils.ts` are pure modules with no plugin dependencies — they must not import from `main`, `settings`, or `import-modal`.
@@ -75,7 +77,9 @@ Frontend ↔ Backend communicate via:
 
 ## URL detection
 
-`backend/main.py` calls `podcast.is_apple_podcast_url(url)` first. If it matches `podcasts.apple.com`, it branches into `_run_podcast_pipeline`; otherwise `_run_youtube_pipeline`. The frontend mirrors this in `url-utils.detectSource()`.
+`backend/main.py`'s `_detect_source()` checks `podcast.is_apple_podcast_url(url)` first → `_run_podcast_pipeline`; then `youtube.is_youtube_url(url)` (or a non-http string, to keep the YouTube error message) → `_run_youtube_pipeline`; any other `http(s)` URL → `_run_web_pipeline`. The frontend mirrors this in `url-utils.detectSource()`.
+
+Web article duplicate detection: the backend writes `source: "<clean_url>"` to the frontmatter and the frontend searches for the same string built by `cleanWebUrl()`. Keep the two cleaners in sync.
 
 ## Processing Pipeline
 
@@ -86,6 +90,12 @@ The `/process` endpoint runs a 4-step SSE streaming pipeline. Steps 1–2 differ
 2. **Transcript** — `youtube.get_transcript()` via youtube-transcript-api, falls back to yt-dlp
 3. **Claude** — `claude.stream_claude()` with `prompts.get_system_prompt(features, source="youtube")`
 4. **Note** — `note.build_obsidian_note()` assembles the final markdown
+
+### Web article pipeline
+1. **Fetch** — `web.fetch_article()` GETs the HTML document only (Safari UA, redirects followed, 20 s timeout, 5 MB cap). Clear errors for 401/403/404/429, non-HTML content types and unreachable hosts.
+2. **Extract** — `trafilatura` keeps the main text only (no comments/images/links/formatting). Fewer than `MIN_WORDS` words → error (paywall / login wall / JS-rendered). Text is capped at `MAX_TEXT_CHARS`. Metadata: title, authors, site, date, description, language, word count, reading time, accessed date.
+3. **Claude** — `source="web"`; never chunked (output is small). Default model is Haiku.
+4. **Note** — `note._build_web_note()`; frontmatter includes `source` (the cleaned URL), `author`, `site`, `published`, `accessed`, `content_type`, `description` (tldr), `useful_for`, `topics`.
 
 ### Podcast pipeline
 1. **Resolve** — `podcast.resolve_episode()`:
@@ -176,6 +186,7 @@ The `deploy` script reads `OBSIDIAN_PLUGINS_PATH` from `obsidian-plugin/.env` an
 - `youtube-transcript-api` — YouTube transcript fetching
 - `yt-dlp` — video metadata + fallback subtitles
 - `feedparser` — podcast RSS parsing (Podcasting 2.0 namespaces)
+- `trafilatura` — web article main-text + metadata extraction
 - `httpx` — HTTP client (RSS fetch, audio download, whisper-server POST)
 - `pydantic` — data validation
 
@@ -203,10 +214,12 @@ Events are JSON objects with at minimum `stage` and `message` fields.
 | `transcript_whisper_starting` | Step 2 podcast — whisper-server is being lazy-started | `step`, `total_steps` |
 | `transcript_whisper_download` | Step 2 podcast — audio download | `step`, `total_steps` |
 | `transcript_whisper_running` | Step 2 podcast — whisper transcription in progress | `step`, `total_steps` |
+| `web_fetch` | Step 1 web — fetching the HTML page | `step`, `total_steps` |
+| `web_extract_done` | Step 2 web — main text extracted | `words`, `transcript_chars` |
 | `claude` / `claude_extended` / `claude_focus` | Step 3 progress | `input_tokens`, `output_tokens`, `elapsed` |
 | `claude_done` | Step 3 complete | `input_tokens`, `output_tokens`, `elapsed`, `cost_usd` |
 | `building` | Step 4 progress | `step`, `total_steps` |
-| `done` | Final result | `filename`, `content`, `metadata`, `resources`, `source` (`"youtube"`/`"podcast"`) |
+| `done` | Final result | `filename`, `content`, `metadata`, `resources`, `source` (`"youtube"`/`"podcast"`/`"web"`) |
 | `error` | Failure at any point | — |
 
 ## Cookie Handling (YouTube only)
@@ -225,4 +238,5 @@ Podcasts don't need cookies — RSS feeds are public.
 - The prompt system is designed for extension. Prefer adding new prompt modules over modifying `base.py`.
 - Token counting in `claude.py` is approximate during streaming (1 delta ≈ 1 token) but corrected by `message_delta` at the end.
 - The `metadata` dict for podcasts contains a `rss_entry` field (a feedparser object). It is NOT JSON-serializable — `_run_podcast_pipeline` strips it before sending the `done` event. Don't add it back unless you also strip it before serialization.
+- The ribbon icon is a bundled SVG registered with `addIcon()` — don't switch it back to a Lucide id; renamed Lucide ids render as an invisible (but clickable) ribbon button.
 - Apple Podcasts episode resolution: do NOT match by `?i=` value against RSS `guid` or `itunes:episode` — those are different namespaces. Use the redirect-based slug match in `podcast.resolve_canonical_slug()`.

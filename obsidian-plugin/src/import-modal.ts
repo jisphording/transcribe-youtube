@@ -1,6 +1,6 @@
 import { App, Modal, Notice } from "obsidian";
 import type YTObsidianPlugin from "./main";
-import { detectSource, extractVideoId, extractAppleEpisodeId, findExistingNote, MediaSource } from "./url-utils";
+import { detectSource, extractVideoId, extractAppleEpisodeId, cleanWebUrl, findExistingNote, MediaSource } from "./url-utils";
 import { processSSEStream } from "./sse-handler";
 
 export class YouTubeImportModal extends Modal {
@@ -39,7 +39,7 @@ export class YouTubeImportModal extends Modal {
         contentEl.createEl("h2", { text: "Import Media" });
 
         contentEl.createEl("p", {
-            text: "Paste a YouTube or Apple Podcasts URL to fetch the transcript, summarize it with Claude, and create a new note.",
+            text: "Paste a YouTube, Apple Podcasts or web article URL. Videos and podcasts are transcribed; articles are summarized (text only — no images or linked pages are loaded).",
             cls: "yt-obsidian-description",
         });
 
@@ -58,7 +58,7 @@ export class YouTubeImportModal extends Modal {
 
         this.urlInput = inputWrapper.createEl("input", {
             type: "text",
-            placeholder: "https://www.youtube.com/watch?v=… or https://podcasts.apple.com/…",
+            placeholder: "https://www.youtube.com/watch?v=…, https://podcasts.apple.com/… or any article URL",
             cls: "yt-obsidian-url-input",
         });
         this.urlInput.style.width = "100%";
@@ -282,11 +282,18 @@ export class YouTubeImportModal extends Modal {
             this.sourceBadgeEl.style.backgroundColor = "var(--color-purple)";
             this.sourceBadgeEl.style.display = "";
             this.podcastOptionsWrapper.style.display = "flex";
+        } else if (this.detectedSource === "web") {
+            this.sourceBadgeEl.setText("Article");
+            this.sourceBadgeEl.style.backgroundColor = "var(--color-blue)";
+            this.sourceBadgeEl.style.display = "";
+            this.podcastOptionsWrapper.style.display = "none";
         } else {
             this.sourceBadgeEl.setText("");
             this.sourceBadgeEl.style.display = "none";
             this.podcastOptionsWrapper.style.display = "none";
         }
+        // Articles have no transcript — the default mode is a plain summary.
+        this.modeToggleBtns[0].setText(this.detectedSource === "web" ? "Summary" : "Transcript");
     }
 
     async startImport() {
@@ -298,12 +305,15 @@ export class YouTubeImportModal extends Modal {
 
         const source = detectSource(url);
         if (source === null) {
-            this.setStatus("⚠️ That doesn't look like a YouTube or Apple Podcasts URL.", "warning");
+            this.setStatus("⚠️ That doesn't look like a valid URL (it must start with http:// or https://).", "warning");
             return;
         }
 
         if (!this.skipDuplicateCheck) {
-            const marker = source === "youtube" ? extractVideoId(url) : extractAppleEpisodeId(url);
+            const marker =
+                source === "youtube" ? extractVideoId(url)
+                : source === "podcast" ? extractAppleEpisodeId(url)
+                : `source: "${cleanWebUrl(url)}"`;
             if (marker) {
                 const folder = this.plugin.folderForSource(source);
                 const existing = await findExistingNote(this.app, folder, marker);
@@ -354,7 +364,7 @@ export class YouTubeImportModal extends Modal {
             const body: Record<string, string | boolean> = { url };
             if (source === "youtube") {
                 body.cookie_browser = "safari";
-            } else {
+            } else if (source === "podcast") {
                 body.whisper_language = this.whisperLanguageInput.value.trim() || "auto";
             }
             if (this.importMode === "extended_summary") {
