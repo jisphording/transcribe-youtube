@@ -14,6 +14,8 @@ class TranscriptRequest(BaseModel):
     extended_model: str = "claude-sonnet-4-6"
     # Podcast-only options
     whisper_language: str | None = None  # None / "auto" / ISO 639-1 like "en", "de"
+    # Web-only: page text pasted by the user when the site blocks automated access
+    manual_text: str | None = None
 
 
 class CookieUpload(BaseModel):

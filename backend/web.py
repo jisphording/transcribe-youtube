@@ -32,7 +32,11 @@ _TRACKING_PARAMS = re.compile(r"^(utm_\w+|fbclid|gclid|mc_cid|mc_eid|ref|ref_src
 
 
 class WebFetchError(Exception):
-    pass
+    """`manual_ok` is False when pasting the page text by hand can't help (404, not HTML)."""
+
+    def __init__(self, message: str, manual_ok: bool = True):
+        super().__init__(message)
+        self.manual_ok = manual_ok
 
 
 def is_web_url(url: str) -> bool:
@@ -54,7 +58,7 @@ def _fetch_html(url: str) -> tuple[str, str]:
                 if resp.status_code in (401, 403):
                     raise WebFetchError(f"Access denied (HTTP {resp.status_code}) — the site blocks automated access or requires a login.")
                 if resp.status_code == 404:
-                    raise WebFetchError("Page not found (HTTP 404).")
+                    raise WebFetchError("Page not found (HTTP 404).", manual_ok=False)
                 if resp.status_code == 429:
                     raise WebFetchError("The site is rate-limiting requests (HTTP 429). Try again later.")
                 if resp.status_code >= 400:
@@ -62,7 +66,7 @@ def _fetch_html(url: str) -> tuple[str, str]:
 
                 ctype = resp.headers.get("content-type", "").lower()
                 if ctype and "html" not in ctype and "xml" not in ctype:
-                    raise WebFetchError(f"Not a web page (content-type: {ctype.split(';')[0]}). Only HTML articles are supported.")
+                    raise WebFetchError(f"Not a web page (content-type: {ctype.split(';')[0]}). Only HTML articles are supported.", manual_ok=False)
 
                 chunks: list[bytes] = []
                 size = 0
@@ -155,3 +159,92 @@ def fetch_article(url: str) -> tuple[dict, str]:
         "truncated": truncated,
     }
     return metadata, text
+
+
+# ─── Manually pasted page text (fallback when the site blocks automated access) ───
+
+# Whole lines that are page chrome on common blog/news platforms (compared lowercased).
+_CHROME_LINES = {
+    "get app", "open in app", "write", "sign up", "sign in", "log in", "login", "register",
+    "follow", "following", "subscribe", "share", "listen", "save", "bookmark", "respond", "reply",
+    "cancel", "menu", "search", "skip to content", "skip to main content", "unknown user",
+    "member-only story", "top highlight", "more", "see all", "read more", "load more",
+    "help", "status", "about", "careers", "press", "blog", "store", "privacy", "rules", "terms",
+    "text to speech", "cookie settings", "accept all cookies", "advertisement",
+    "press enter or click to view image in full size", "remember me for faster sign in",
+    "write a response", "what are your thoughts?", "no responses yet", "see more recommendations",
+}
+_COUNT_LINE = re.compile(r"^[\d.,]+[kKmM]?$|^[·•|\-–—]+$")
+_READ_TIME_LINE = re.compile(r"^\d+\s*min(ute)?s?\s+read$", re.I)
+
+
+def clean_pasted_text(text: str) -> str:
+    """Deterministic first pass over clipboard text: drop obvious UI chrome and duplicates.
+
+    Anything subtler (tag lists, author bios, recommendations) is left for Claude,
+    which reports where the article body starts and ends — see `trim_to_body`.
+    """
+    lines: list[str] = []
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = re.sub(r"[ \t ​]+", " ", raw).strip()
+        low = line.lower()
+        if line and (low in _CHROME_LINES or _COUNT_LINE.match(line) or _READ_TIME_LINE.match(line)):
+            continue
+        if line and lines and line == lines[-1]:
+            continue
+        lines.append(line)
+    return _compact("\n".join(lines))
+
+
+def _snippet_pattern(snippet: str) -> re.Pattern | None:
+    words = re.findall(r"\S+", snippet)
+    return re.compile(r"\s+".join(re.escape(w) for w in words)) if words else None
+
+
+def trim_to_body(text: str, first_words: str, last_words: str) -> str:
+    """Cut `text` to the span between two verbatim snippets. Falls back to the full text."""
+    start_pat, end_pat = _snippet_pattern(first_words), _snippet_pattern(last_words)
+    start = start_pat.search(text) if start_pat else None
+    begin = start.start() if start else 0
+    ends = list(end_pat.finditer(text, begin)) if end_pat else []
+    end = ends[-1].end() if ends else len(text)
+    body = text[begin:end].strip()
+    return body if len(body.split()) >= MIN_WORDS // 2 else text
+
+
+def pasted_article(url: str, text: str) -> tuple[dict, str]:
+    """Build (metadata, text) from text the user copied from the page.
+
+    Title, author and date are unknown here — Claude fills them in from the text.
+    """
+    text = clean_pasted_text(text)
+    word_count = len(text.split())
+    if word_count < MIN_WORDS:
+        raise WebFetchError(f"The pasted text has only {word_count} words — copy the whole article and try again.")
+
+    truncated = len(text) > MAX_TEXT_CHARS
+    if truncated:
+        text = text[:MAX_TEXT_CHARS]
+
+    parts = urlsplit(url.strip())
+    slug = parts.path.strip("/").split("/")[-1] if parts.path.strip("/") else ""
+    metadata = {
+        "source": "web",
+        "manual": True,
+        "title": slug or parts.netloc or "Untitled",
+        "authors": [],
+        "site": parts.netloc.lower().removeprefix("www."),
+        "url": clean_url(url),
+        "published": "",
+        "accessed": date.today().isoformat(),
+        "description": "",
+        "language": "",
+        "truncated": truncated,
+    }
+    set_word_count(metadata, text)
+    return metadata, text
+
+
+def set_word_count(metadata: dict, text: str) -> None:
+    metadata["word_count"] = len(text.split())
+    metadata["reading_time"] = f"{max(1, round(metadata['word_count'] / WORDS_PER_MINUTE))} min"

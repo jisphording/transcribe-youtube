@@ -10,7 +10,7 @@ from sse_starlette.sse import EventSourceResponse
 from models import TranscriptRequest, CookieUpload
 from youtube import is_youtube_url, extract_video_id, get_video_metadata, get_transcript, transcript_to_plain_text
 from podcast import is_apple_podcast_url, resolve_episode, get_rss_transcript
-from web import is_web_url, fetch_article, WebFetchError, MAX_TEXT_CHARS
+from web import is_web_url, fetch_article, pasted_article, trim_to_body, set_word_count, WebFetchError, MAX_TEXT_CHARS
 import whisper as whisper_mod
 from whisper import transcribe_url as whisper_transcribe, WhisperUnavailableError, DEFAULT_SERVER_URL
 from note import build_obsidian_note
@@ -361,29 +361,47 @@ def _run_podcast_pipeline(request: TranscriptRequest, total_steps: int):
 # ─── Web article pipeline ───────────────────────────────────────────────────
 
 def _run_web_pipeline(request: TranscriptRequest, total_steps: int):
-    # Step 1: Fetch the HTML document only (no images, scripts or linked pages)
-    yield _sse_event("web_fetch", f"Step 1/{total_steps} — Fetching page (text only)…",
-                     step=1, total_steps=total_steps)
-    try:
-        metadata, text = fetch_article(request.url)
-    except WebFetchError as e:
-        yield _sse_event("error", f"Page not accessible: {e}")
-        return
-    except Exception as e:
-        yield _sse_event("error", f"Could not fetch page: {e}")
-        return
+    if request.manual_text:
+        # Step 1+2: the user pasted the page text because the site blocked us
+        try:
+            metadata, text = pasted_article(request.url, request.manual_text)
+        except WebFetchError as e:
+            yield _sse_event("error", str(e))
+            return
+        yield _sse_event(
+            "metadata_done",
+            f"Step 1/{total_steps} — Using pasted page text ({metadata['site']})",
+            step=1, total_steps=total_steps,
+        )
+        extracted_label = "Cleaned pasted text"
+    else:
+        # Step 1: Fetch the HTML document only (no images, scripts or linked pages)
+        yield _sse_event("web_fetch", f"Step 1/{total_steps} — Fetching page (text only)…",
+                         step=1, total_steps=total_steps)
+        try:
+            metadata, text = fetch_article(request.url)
+        except WebFetchError as e:
+            if e.manual_ok:
+                yield _sse_event("web_blocked", f"Page not accessible: {e}")
+            else:
+                yield _sse_event("error", f"Page not accessible: {e}")
+            return
+        except Exception as e:
+            yield _sse_event("error", f"Could not fetch page: {e}")
+            return
 
-    byline = f" · {', '.join(metadata['authors'])}" if metadata["authors"] else ""
-    yield _sse_event(
-        "metadata_done",
-        f"Step 1/{total_steps} — Page accessible: {metadata['site']}{byline}",
-        step=1, total_steps=total_steps,
-    )
+        byline = f" · {', '.join(metadata['authors'])}" if metadata["authors"] else ""
+        yield _sse_event(
+            "metadata_done",
+            f"Step 1/{total_steps} — Page accessible: {metadata['site']}{byline}",
+            step=1, total_steps=total_steps,
+        )
+        extracted_label = f"Extracted \"{metadata['title']}\""
 
     note = f" (truncated to first {MAX_TEXT_CHARS:,} chars)" if metadata["truncated"] else ""
     yield _sse_event(
         "web_extract_done",
-        f"Step 2/{total_steps} — Extracted \"{metadata['title']}\" — {metadata['word_count']:,} words{note}",
+        f"Step 2/{total_steps} — {extracted_label} — {metadata['word_count']:,} words{note}",
         step=2, total_steps=total_steps,
         words=metadata["word_count"], transcript_chars=len(text),
     )
@@ -420,6 +438,9 @@ def _run_claude_and_note(
         features.append("focus")
     if request.extract_resources:
         features.append("resources")
+    pasted = source == "web" and metadata.get("manual", False)
+    if pasted:
+        features.append("pasted")
 
     use_extended_model = request.extended_summary or bool(request.focus_topic) or request.focus_include_extended
     if use_extended_model:
@@ -560,6 +581,15 @@ Multi-speaker detected: {is_multi_speaker}{focus_line}
 --- END TRANSCRIPT ---
 
 Please process this transcript according to the instructions."""
+        elif source == "web" and pasted:
+            user_message = f"""Page URL: {metadata['url']}
+Site: {metadata['site']}{focus_line}
+
+--- PASTED PAGE TEXT ---
+{raw_text}
+--- END PASTED PAGE TEXT ---
+
+Please process this article according to the instructions."""
         elif source == "web":
             user_message = f"""Article Title: {metadata['title']}
 Author: {', '.join(metadata['authors']) or 'unknown'}
@@ -644,6 +674,12 @@ Please process this transcript according to the instructions."""
             "content_type": result.get("content_type", ""),
             "useful_for": result.get("useful_for", []),
         } if source == "web" else None
+        if pasted:
+            metadata["title"] = (result.get("title") or "").strip() or metadata["title"]
+            metadata["authors"] = [a.strip() for a in result.get("authors") or [] if isinstance(a, str) and a.strip()]
+            metadata["published"] = (result.get("published") or "").strip()
+            body = trim_to_body(raw_text, result.get("body_first_words") or "", result.get("body_last_words") or "")
+            set_word_count(metadata, body)
 
     # Step 4: Build note
     yield _sse_event("building", f"Step 4/{total_steps} — Building Obsidian note…",

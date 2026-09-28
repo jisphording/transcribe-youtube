@@ -89,6 +89,8 @@ def _build_web_note(
     if metadata.get("published"):
         fm.append(f"published: {_yaml_str(metadata['published'])}")
     fm.append(f"accessed: {_yaml_str(metadata['accessed'])}")
+    if metadata.get("manual"):
+        fm.append('capture: "manual paste"')
     if article_info.get("content_type"):
         fm.append(f"content_type: {_yaml_str(article_info['content_type'])}")
     if metadata.get("language"):

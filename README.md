@@ -155,6 +155,7 @@ tags:
 
 - **One modal, three sources** — paste a YouTube URL, an Apple Podcasts URL or any web article URL; the plugin auto-detects which it is and adapts the UI.
 - **Token-lean article summaries** — only the HTML document is downloaded (no images, scripts, stylesheets or linked pages). [trafilatura](https://trafilatura.readthedocs.io) strips navigation, ads, cookie banners, comments, images and links, so Claude only sees the main text (capped at ~60k chars). Articles are summarized in Claude's own words — there is no verbatim copy of the article in the note. Paywalled, login-walled or JavaScript-only pages are detected and reported instead of producing an empty summary.
+- **Manual paste fallback for blocked sites** — when a site blocks automated access (e.g. Medium's HTTP 403), the modal asks you to paste the page text instead: open the page, ⌘A / ⌘C, then *Paste from clipboard*. Page clutter (menus, tag lists, author bio, comments, recommended articles) is stripped in two passes — a rule-based filter, then Claude recovers title / author / date and marks where the article body starts and ends. Such notes get `capture: "manual paste"` in the frontmatter.
 - **Model selection** — Haiku (fastest), Sonnet (balanced), or Opus (highest quality), picked per-import.
 - **Extended summary** — a topic-by-topic editorial rewrite that reads like a standalone piece.
 - **Focus topic** — deep-dive summary on a specific user-supplied topic.

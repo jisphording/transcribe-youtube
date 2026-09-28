@@ -1,7 +1,7 @@
 import { App, Modal, Notice } from "obsidian";
 import type YTObsidianPlugin from "./main";
 import { detectSource, extractVideoId, extractAppleEpisodeId, cleanWebUrl, findExistingNote, MediaSource } from "./url-utils";
-import { processSSEStream } from "./sse-handler";
+import { processSSEStream, ManualPasteRequiredError } from "./sse-handler";
 
 export class YouTubeImportModal extends Modal {
     plugin: YTObsidianPlugin;
@@ -16,6 +16,9 @@ export class YouTubeImportModal extends Modal {
     extractResourcesCheckbox: HTMLInputElement;
     podcastOptionsWrapper: HTMLElement;
     whisperLanguageInput: HTMLInputElement;
+    manualPasteWrapper: HTMLElement;
+    manualPasteReasonEl: HTMLElement;
+    manualTextInput: HTMLTextAreaElement;
     statusEl: HTMLElement;
     detailEl: HTMLElement;
     progressWrapper: HTMLElement;
@@ -219,6 +222,50 @@ export class YouTubeImportModal extends Modal {
         langHint.style.fontSize = "12px";
         langHint.style.color = "var(--text-muted)";
 
+        // Manual paste fallback (shown when the site blocks automated access)
+        this.manualPasteWrapper = contentEl.createDiv({ cls: "yt-obsidian-manual-paste" });
+        this.manualPasteWrapper.style.marginTop = "12px";
+        this.manualPasteWrapper.style.padding = "10px";
+        this.manualPasteWrapper.style.border = "1px solid var(--background-modifier-border)";
+        this.manualPasteWrapper.style.borderRadius = "6px";
+        this.manualPasteWrapper.style.display = "none";
+
+        this.manualPasteReasonEl = this.manualPasteWrapper.createDiv();
+        this.manualPasteReasonEl.style.fontSize = "13px";
+        this.manualPasteReasonEl.style.color = "var(--text-warning)";
+        const pasteHelp = this.manualPasteWrapper.createEl("p", {
+            text: "Open the page in your browser, select all (⌘A), copy (⌘C) and paste it here. Menus, comments and recommendations are cleaned up automatically.",
+        });
+        pasteHelp.style.fontSize = "12px";
+        pasteHelp.style.color = "var(--text-muted)";
+        pasteHelp.style.margin = "6px 0";
+
+        const pasteBtnRow = this.manualPasteWrapper.createDiv();
+        pasteBtnRow.style.display = "flex";
+        pasteBtnRow.style.gap = "8px";
+        pasteBtnRow.style.marginBottom = "6px";
+        const openPageBtn = pasteBtnRow.createEl("button", { text: "Open page in browser" });
+        openPageBtn.addEventListener("click", () => window.open(this.urlInput.value.trim()));
+        const pasteBtn = pasteBtnRow.createEl("button", { text: "Paste from clipboard" });
+        pasteBtn.addEventListener("click", async () => {
+            try {
+                this.manualTextInput.value = await navigator.clipboard.readText();
+                this.updatePasteStats();
+            } catch (e) {
+                this.setStatus("⚠️ Could not read the clipboard — paste into the text field with ⌘V.", "warning");
+            }
+        });
+
+        this.manualTextInput = this.manualPasteWrapper.createEl("textarea", {
+            placeholder: "Paste the page text here…",
+        });
+        this.manualTextInput.style.width = "100%";
+        this.manualTextInput.style.minHeight = "120px";
+        this.manualTextInput.style.fontSize = "12px";
+        this.manualTextInput.style.resize = "vertical";
+        this.manualTextInput.style.boxSizing = "border-box";
+        this.manualTextInput.addEventListener("input", () => this.updatePasteStats());
+
         // Progress bar
         const progressWrapper = contentEl.createDiv({ cls: "yt-obsidian-progress-wrapper" });
         progressWrapper.style.marginTop = "12px";
@@ -270,7 +317,30 @@ export class YouTubeImportModal extends Modal {
         setTimeout(() => this.urlInput.focus(), 50);
     }
 
+    showManualPaste(reason: string) {
+        this.manualPasteReasonEl.setText(`${reason} You can paste the article text instead.`);
+        this.manualPasteWrapper.style.display = "block";
+        this.setStatus("📋 Paste the page text below, then click Import.", "warning");
+        this.setDetail("");
+        setTimeout(() => this.manualTextInput.focus(), 50);
+    }
+
+    hideManualPaste() {
+        this.manualPasteWrapper.style.display = "none";
+        this.manualTextInput.value = "";
+    }
+
+    isManualPasteActive(): boolean {
+        return this.manualPasteWrapper.style.display !== "none";
+    }
+
+    updatePasteStats() {
+        const words = this.manualTextInput.value.trim().split(/\s+/).filter(Boolean).length;
+        this.setDetail(words ? `${words.toLocaleString()} words pasted (before cleanup)` : "");
+    }
+
     refreshSourceUI() {
+        if (this.manualPasteWrapper && this.isManualPasteActive()) this.hideManualPaste();
         this.detectedSource = detectSource(this.urlInput.value);
         if (this.detectedSource === "youtube") {
             this.sourceBadgeEl.setText("YouTube");
@@ -343,10 +413,15 @@ export class YouTubeImportModal extends Modal {
             }
         }
         this.skipDuplicateCheck = false;
-        this.skipDuplicateCheck = false;
 
         if (this.importMode === "focus_topic" && !this.focusTopicInput.value.trim()) {
             this.setStatus("⚠️ Please enter a focus instruction.", "warning");
+            return;
+        }
+
+        const manualText = source === "web" && this.isManualPasteActive() ? this.manualTextInput.value.trim() : "";
+        if (source === "web" && this.isManualPasteActive() && !manualText) {
+            this.setStatus("⚠️ Paste the page text first.", "warning");
             return;
         }
 
@@ -358,6 +433,7 @@ export class YouTubeImportModal extends Modal {
         this.focusTopicInput.disabled = true;
         this.focusIncludeExtendedCheckbox.disabled = true;
         this.whisperLanguageInput.disabled = true;
+        this.manualTextInput.disabled = true;
         this.setStatus("⏳ Connecting to backend…", "info");
 
         try {
@@ -367,6 +443,8 @@ export class YouTubeImportModal extends Modal {
                 body.cookie_browser = "safari";
             } else if (source === "podcast") {
                 body.whisper_language = this.whisperLanguageInput.value.trim() || "auto";
+            } else if (manualText) {
+                body.manual_text = manualText;
             }
             if (this.importMode === "extended_summary") {
                 body.extended_summary = true;
@@ -423,9 +501,15 @@ export class YouTubeImportModal extends Modal {
             const closeBtn = this.btnRow.createEl("button", { text: "Ok", cls: "mod-cta" });
             closeBtn.addEventListener("click", () => this.close());
         } catch (error) {
-            console.error("[Media Obsidian]", error);
-            this.setStatus(`❌ ${error.message}`, "error");
-            this.setDetail("");
+            if (error instanceof ManualPasteRequiredError) {
+                this.showManualPaste(error.message);
+                // The duplicate check already passed for this URL.
+                this.skipDuplicateCheck = true;
+            } else {
+                console.error("[Media Obsidian]", error);
+                this.setStatus(`❌ ${error.message}`, "error");
+                this.setDetail("");
+            }
             this.progressWrapper.style.display = "none";
             this.importBtn.disabled = false;
             this.urlInput.disabled = false;
@@ -435,6 +519,7 @@ export class YouTubeImportModal extends Modal {
             this.focusTopicInput.disabled = false;
             this.focusIncludeExtendedCheckbox.disabled = false;
             this.whisperLanguageInput.disabled = false;
+            this.manualTextInput.disabled = false;
         }
     }
 

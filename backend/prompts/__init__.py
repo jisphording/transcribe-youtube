@@ -25,6 +25,11 @@ PROMPTS = {
         "description": "Summary + key points + knowledge-base metadata for web articles (replaces base)",
         "module": "prompts.article",
     },
+    "pasted": {
+        "name": "Pasted Page Text",
+        "description": "Recover metadata + article boundaries from manually pasted page text (web only)",
+        "module": "prompts.pasted",
+    },
     "extended": {
         "name": "Extended Summary",
         "description": "Topic-by-topic editorial rewrite",
@@ -97,7 +102,7 @@ Your job is to turn the extracted main text of a {terms['kind']} into a concise,
 
 You will receive:
 {terms['metadata_line']}
-- The article's main text (images, links and page chrome already removed)"""
+{"- The full page text as copied manually by the user (article plus page clutter)" if "pasted" in features else "- The article's main text (images, links and page chrome already removed)"}"""
     else:
         preamble = f"""{role_line}
 Your job is to process a raw {terms['kind']} transcript and return a clean, well-structured result.

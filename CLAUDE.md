@@ -36,6 +36,7 @@ Each file has a single responsibility. Do not merge concerns across modules.
 | `cookies.py` | Cookie file persistence (save/delete/check) | — |
 | `prompts/__init__.py` | Source-aware prompt registry and composition engine | prompt feature modules |
 | `prompts/base.py` | Base prompt: transcript cleaning + short summary + topics | — |
+| `prompts/pasted.py` | Added with `article` when the user pasted the page text by hand: recovers `title`, `authors`, `published` and the verbatim `body_first_words` / `body_last_words` so the backend can trim page clutter | — |
 | `prompts/article.py` | Base prompt for `source="web"` (replaces `base`): tldr, summary, key points, topics, content type, useful-for. No transcript key — articles are never reproduced | — |
 | `prompts/extended.py` | Extended summary prompt: topic-by-topic editorial rewrite | — |
 | `prompts/focus.py` | Focus topic prompt: deep-dive on a user-supplied topic | — |
@@ -96,6 +97,8 @@ The `/process` endpoint runs a 4-step SSE streaming pipeline. Steps 1–2 differ
 1. **Fetch** — `web.fetch_article()` GETs the HTML document only (Safari UA, redirects followed, 20 s timeout, 5 MB cap). Clear errors for 401/403/404/429, non-HTML content types and unreachable hosts.
 2. **Extract** — `trafilatura` keeps the main text only (no comments/images/links/formatting). Fewer than `MIN_WORDS` words → error (paywall / login wall / JS-rendered). Text is capped at `MAX_TEXT_CHARS`. Metadata: title, authors, site, date, description, language, word count, reading time, accessed date.
 3. **Claude** — `source="web"`; never chunked (output is small). Default model is Haiku.
+**Manual paste fallback:** when `fetch_article()` raises a `WebFetchError` with `manual_ok=True` (everything except 404 / non-HTML), the backend emits `web_blocked` instead of `error`. The modal then shows a paste box and re-POSTs with `manual_text`. `web.pasted_article()` runs a rule-based cleanup (`clean_pasted_text`: chrome lines, counts, duplicates), the `pasted` prompt feature returns title/authors/date + body boundaries, and `web.trim_to_body()` recomputes the word count from the article body only.
+
 4. **Note** — `note._build_web_note()`; frontmatter includes `source` (the cleaned URL), `author`, `site`, `published`, `accessed`, `content_type`, `description` (tldr), `useful_for`, `topics`.
 
 ### Podcast pipeline
@@ -217,6 +220,7 @@ Events are JSON objects with at minimum `stage` and `message` fields.
 | `transcript_whisper_running` | Step 2 podcast — whisper transcription in progress | `step`, `total_steps` |
 | `web_fetch` | Step 1 web — fetching the HTML page | `step`, `total_steps` |
 | `web_extract_done` | Step 2 web — main text extracted | `words`, `transcript_chars` |
+| `web_blocked` | Web fetch refused/failed — terminal; frontend asks the user to paste the page text and retries with `manual_text` | — |
 | `claude` / `claude_extended` / `claude_focus` | Step 3 progress | `input_tokens`, `output_tokens`, `elapsed` |
 | `claude_done` | Step 3 complete | `input_tokens`, `output_tokens`, `elapsed`, `cost_usd` |
 | `building` | Step 4 progress | `step`, `total_steps` |

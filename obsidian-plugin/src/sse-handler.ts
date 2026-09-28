@@ -18,6 +18,9 @@ export interface SSEResult {
     source: SSESource;
 }
 
+/** The site blocked automated access — the user can paste the page text instead. */
+export class ManualPasteRequiredError extends Error {}
+
 export async function processSSEStream(response: Response, callbacks: SSECallbacks): Promise<SSEResult> {
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
@@ -114,6 +117,8 @@ export async function processSSEStream(response: Response, callbacks: SSECallbac
                         source: ((event.source as SSESource) ?? "youtube"),
                     };
                     break;
+                case "web_blocked":
+                    throw new ManualPasteRequiredError(message);
                 case "error":
                     throw new Error(message);
             }
