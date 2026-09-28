@@ -156,14 +156,15 @@ tags:
 - **One modal, three sources** — paste a YouTube URL, an Apple Podcasts URL or any web article URL; the plugin auto-detects which it is and adapts the UI.
 - **Token-lean article summaries** — only the HTML document is downloaded (no images, scripts, stylesheets or linked pages). [trafilatura](https://trafilatura.readthedocs.io) strips navigation, ads, cookie banners, comments, images and links, so Claude only sees the main text (capped at ~60k chars). Articles are summarized in Claude's own words — there is no verbatim copy of the article in the note. Paywalled, login-walled or JavaScript-only pages are detected and reported instead of producing an empty summary.
 - **Manual paste fallback for blocked sites** — when a site blocks automated access (e.g. Medium's HTTP 403), the modal asks you to paste the page text instead: open the page, ⌘A / ⌘C, then *Paste from clipboard*. Page clutter (menus, tag lists, author bio, comments, recommended articles) is stripped in two passes — a rule-based filter, then Claude recovers title / author / date and marks where the article body starts and ends. Such notes get `capture: "manual paste"` in the frontmatter.
-- **Model selection** — Haiku (fastest), Sonnet (balanced), or Opus (highest quality), picked per-import.
+- **Batch import** — paste a YouTube channel, a playlist or an Apple Podcasts show URL to import the latest X items (all, if there are ≤ 20), filtered by a minimum length (default 15 min). You see the list and the estimated cost first; after you confirm, the backend works through the queue on its own — even with Obsidian closed — and writes the notes straight into your vault.
+- **Model selection** — Haiku 4.5 (fastest), Sonnet 5 (balanced), or Opus 5.5 (highest quality), picked per-import.
 - **Extended summary** — a topic-by-topic editorial rewrite that reads like a standalone piece.
 - **Focus topic** — deep-dive summary on a specific user-supplied topic.
 - **Resource extraction** — pulls every product / tool / website / service mentioned and creates `[[wiki-link]]` stubs in your vault.
 - **RSS-first podcast transcripts** — uses the free `<podcast:transcript>` tag when shows publish one (many shows already do).
 - **Local whisper.cpp fallback** — when no RSS transcript is available, transcribes audio offline on your Mac via Metal-accelerated whisper.cpp. Audio never leaves the machine.
 - **Cookie support** — Safari (default) / Chrome / Firefox / Edge / Brave via automatic browser extraction, with a `cookies.txt` upload fallback. Handles age-restricted and region-locked YouTube videos.
-- **Duplicate detection** — warns you if a note for the same video/episode already exists in your vault.
+- **Duplicate detection** — warns you if a note for the same video/episode already exists in your vault. New notes carry `youtube_id` / `apple_episode_id` + `episode_guid` in the frontmatter; batches skip everything already imported.
 - **Auto-start** — backend (and optionally whisper-server) run as launchd agents from the moment you log in.
 
 ---
@@ -313,7 +314,7 @@ tail -f /tmp/whisper-server.log /tmp/whisper-server.err  # logs
 
 ### Trigger the import
 - Click the audio-file icon in the left ribbon, **or**
-- `Cmd+P` → **Import Media (YouTube or Podcast) as Note**
+- `Cmd+P` → **Import Media (YouTube, Podcast or Web Article) as Note**
 
 ### In the dialog
 1. Paste a YouTube, Apple Podcasts or web article URL — a small badge shows the detected source (YouTube / Podcast / Article)
@@ -323,6 +324,23 @@ tail -f /tmp/whisper-server.log /tmp/whisper-server.err  # logs
 5. **Import** (or press Enter)
 
 The new note opens automatically. Videos over ~90 minutes start getting unreliable (YouTube rate-limits, transcripts truncate); Sonnet or Opus handles long videos better than Haiku. Podcasts of any length work, but whisper transcription scales linearly with duration (~3–5 min per hour on M-series).
+
+### Batch import (channels, playlists, podcast shows)
+
+1. Paste a channel (`youtube.com/@name`), playlist (`youtube.com/playlist?list=…`) or Apple Podcasts show URL (no `?i=`) — the badge shows **Channel / Playlist** or **Podcast show**
+2. Set how many of the latest items to import (empty = all, up to 20) and the minimum length in minutes (default 15)
+3. Pick the output mode, model and options as for a single import — they apply to every item
+4. **Preview** lists the items, marks those already in your vault, and shows the estimated cost range
+5. **Start import** queues the batch and opens the **Import queue** sidebar (`Cmd+P` → *Show import queue*)
+
+How the queue behaves:
+- One item at a time. YouTube items get a random 15–45 s pause and at most 60 per hour, to stay clear of YouTube's bot checks; podcasts only pause briefly (whisper is the bottleneck).
+- Channels use the *Videos* tab only — Shorts and livestreams are skipped.
+- If YouTube blocks the Mac ("confirm you're not a bot"), the YouTube lane pauses for 30 min, then 2 h, then 6 h; podcast items keep going. *Resume now* in the sidebar lifts the pause early.
+- The queue lives in `backend/data/batch.db` and survives restarts; an item interrupted by a crash simply runs again.
+- Right before writing, the backend checks the vault again, so an item you imported by hand in the meantime is skipped.
+- Apple lists at most 200 episodes per show. Unconfirmed previews expire after 30 minutes.
+- Batch import needs the desktop app: the backend writes into the vault folder on disk.
 
 ### Plugin settings
 

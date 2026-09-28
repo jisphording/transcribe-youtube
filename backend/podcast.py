@@ -178,7 +178,6 @@ def find_episode(
             matched = best_entry
             strategy = "slug-token"
 
-    notice = None
     if matched is None:
         # Hard fail: do NOT silently use the latest episode.
         sample = "\n".join(
@@ -191,6 +190,10 @@ def find_episode(
             "Try pasting the URL again, or check that the show isn't paywalled."
         )
 
+    return _episode_metadata(feed, matched, apple_url), {"matched": True, "strategy": strategy, "notice": None}
+
+
+def _episode_metadata(feed: feedparser.FeedParserDict, matched: dict, apple_url: str) -> dict:
     show_title = feed.feed.get("title", "Unknown Show")
 
     audio_url = None
@@ -213,8 +216,11 @@ def find_episode(
     elif feed.feed.get("image", {}).get("href"):
         image_url = feed.feed["image"]["href"]
 
-    metadata = {
+    _show_id, episode_id, _slug = parse_apple_url(apple_url)
+    return {
         "source": "podcast",
+        "apple_episode_id": episode_id or "",
+        "episode_guid": matched.get("id", ""),
         "title": matched.get("title", "Untitled Episode"),
         "show": show_title,
         "show_url": feed.feed.get("link", ""),
@@ -228,7 +234,6 @@ def find_episode(
         "thumbnail_url": image_url,
         "rss_entry": matched,  # passed along to RSS transcript fetcher
     }
-    return metadata, {"matched": True, "strategy": strategy, "notice": notice}
 
 
 # ─── RSS transcript (Podcasting 2.0) ─────────────────────────────────────────
@@ -384,3 +389,79 @@ def resolve_episode(apple_url: str) -> tuple[dict, dict]:
     metadata, match_info = find_episode(feed, apple_url, title_slug, canonical_slug)
     metadata["rss_url"] = rss_url
     return metadata, match_info
+
+
+def resolve_episode_by_guid(apple_url: str, guid: str) -> tuple[dict, dict]:
+    """Batch mode: the iTunes episode lookup already gave us the RSS guid, so no slug matching."""
+    show_id, _track_id, _slug = parse_apple_url(apple_url)
+    rss_url = get_rss_feed_url(show_id)
+    feed = fetch_rss(rss_url)
+    matched = next((e for e in feed.entries if e.get("id") == guid), None)
+    if matched is None:
+        raise ValueError(f"Episode guid {guid!r} is no longer in the RSS feed.")
+    metadata = _episode_metadata(feed, matched, apple_url)
+    metadata["rss_url"] = rss_url
+    return metadata, {"matched": True, "strategy": "guid", "notice": None}
+
+
+# ─── Show listing (batch queue) ──────────────────────────────────────────────
+
+ITUNES_EPISODE_CAP = 200
+
+
+def is_apple_show_url(url: str) -> bool:
+    return is_apple_podcast_url(url) and bool(re.search(r"/id\d+", url)) and not re.search(r"[?&]i=\d+", url)
+
+
+def list_show_episodes(show_url: str, limit: int, min_seconds: int) -> dict:
+    """Newest-first episodes of an Apple Podcasts show. The iTunes episode lookup maps
+    Apple ids (?i=) to RSS guids, so batch items never need slug matching. Returns
+    {title, items: [{apple_episode_id, episode_guid, url, title, duration_seconds}], has_more, capped}."""
+    show_id, _ep, _slug = parse_apple_url(show_url)
+    capped = limit > ITUNES_EPISODE_CAP
+    fetch_n = min(max(limit * 2, limit + 1), ITUNES_EPISODE_CAP)
+    res = httpx.get(
+        f"https://itunes.apple.com/lookup?id={show_id}&entity=podcastEpisode&limit={fetch_n}",
+        timeout=20.0,
+    )
+    res.raise_for_status()
+    results = res.json().get("results", [])
+    show = next((r for r in results if r.get("kind") == "podcast"), {})
+    episodes = [r for r in results if r.get("wrapperType") == "podcastEpisode"]
+    feed_url = show.get("feedUrl")
+    if not feed_url:
+        raise ValueError(
+            f"No RSS feed found for Apple Podcasts show ID {show_id}. "
+            "The show may be Spotify-exclusive or paywalled."
+        )
+    rss_by_guid = {e.get("id"): e for e in fetch_rss(feed_url).entries if e.get("id")}
+
+    items = []
+    for ep in episodes:
+        entry = rss_by_guid.get(ep.get("episodeGuid"))
+        if entry is None:
+            continue  # not (or no longer) in the RSS feed — can't be transcribed
+        duration = (ep.get("trackTimeMillis") or 0) // 1000 or _parse_duration(entry.get("itunes_duration"))
+        # Many feeds omit durations: keep those episodes rather than silently dropping them
+        if duration and duration < min_seconds:
+            continue
+        items.append({
+            "apple_episode_id": str(ep["trackId"]),
+            "episode_guid": ep["episodeGuid"],
+            "url": re.sub(r"&uo=\d+", "", ep.get("trackViewUrl", "")),
+            "title": ep.get("trackName") or entry.get("title", ""),
+            "duration_seconds": duration,
+            "duration_estimated": not duration,
+        })
+    known = sorted(i["duration_seconds"] for i in items if i["duration_seconds"])
+    median = known[len(known) // 2] if known else 3600
+    for i in items:
+        if i["duration_estimated"]:
+            i["duration_seconds"] = median
+    limit = min(limit, ITUNES_EPISODE_CAP)
+    return {
+        "title": show.get("collectionName", ""),
+        "items": items[:limit],
+        "has_more": len(items) > limit or len(episodes) >= fetch_n,
+        "capped": capped,
+    }

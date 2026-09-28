@@ -1,7 +1,17 @@
-import { Plugin, TFile, addIcon, normalizePath } from "obsidian";
+import { FileSystemAdapter, Plugin, TFile, addIcon, normalizePath } from "obsidian";
 import type { SSEResource, SSESource } from "./sse-handler";
 import { YTObsidianSettings, DEFAULT_SETTINGS, YTObsidianSettingTab, FolderKey } from "./settings";
 import { YouTubeImportModal } from "./import-modal";
+import { QueueView, QUEUE_VIEW_TYPE } from "./queue-view";
+
+// Where the backend's batch queue writes notes (absolute paths) and which folders
+// count for duplicate detection (vault-relative for metadataCache, absolute for the backend).
+export interface BatchTargets {
+    vaultRoot: string;
+    folders: { youtube: string; podcast: string; resources: string };
+    scanFolders: string[];
+    scanRoots: string[];
+}
 
 // Bundled as SVG so the ribbon icon never depends on Obsidian's Lucide version
 // (a renamed Lucide id renders as an invisible-but-clickable ribbon button).
@@ -28,6 +38,13 @@ export default class YTObsidianPlugin extends Plugin {
             new YouTubeImportModal(this.app, this).open();
         });
 
+        this.registerView(QUEUE_VIEW_TYPE, (leaf) => new QueueView(leaf, this));
+        this.addCommand({
+            id: "show-import-queue",
+            name: "Show import queue",
+            callback: () => this.activateQueueView(),
+        });
+
         this.addSettingTab(new YTObsidianSettingTab(this.app, this));
 
         if (this.settings.keepWhisperWarm) {
@@ -43,6 +60,33 @@ export default class YTObsidianPlugin extends Plugin {
         const apiUrl = this.settings.apiUrl.replace(/\/$/, "");
         // Best-effort, fire-and-forget — don't block Obsidian's lifecycle on a network call.
         fetch(`${apiUrl}/whisper/${action}`, { method: "POST" }).catch(() => {});
+    }
+
+    async activateQueueView() {
+        const existing = this.app.workspace.getLeavesOfType(QUEUE_VIEW_TYPE)[0];
+        const leaf = existing ?? this.app.workspace.getRightLeaf(false);
+        if (!leaf) return;
+        if (!existing) await leaf.setViewState({ type: QUEUE_VIEW_TYPE, active: true });
+        this.app.workspace.revealLeaf(leaf);
+    }
+
+    /** Null on mobile: the backend can only write into a vault on this machine's disk. */
+    batchTargets(): BatchTargets | null {
+        const adapter = this.app.vault.adapter;
+        if (!(adapter instanceof FileSystemAdapter)) return null;
+        const base = adapter.getBasePath();
+        const abs = (p: string) => `${base}/${p}`;
+        const youtube = this.folderForSource("youtube");
+        const podcast = this.folderForSource("podcast");
+        const scanFolders = this.settings.useParentFolder
+            ? [normalizePath(this.settings.mediaTranscriptsFolder.trim() || DEFAULT_SETTINGS.mediaTranscriptsFolder)]
+            : [youtube, podcast];
+        return {
+            vaultRoot: base,
+            folders: { youtube: abs(youtube), podcast: abs(podcast), resources: abs(this.resourceFolder()) },
+            scanFolders,
+            scanRoots: scanFolders.map(abs),
+        };
     }
 
     async loadSettings() {

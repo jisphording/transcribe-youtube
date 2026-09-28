@@ -10,6 +10,7 @@ obsidian-plugin/.env
 
 # Local
 cookies.txt
+backend/data/
 
 # Python
 __pycache__/

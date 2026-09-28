@@ -1,7 +1,13 @@
 import { App, Modal, Notice } from "obsidian";
 import type YTObsidianPlugin from "./main";
-import { detectSource, extractVideoId, extractAppleEpisodeId, cleanWebUrl, findExistingNote, MediaSource } from "./url-utils";
+import { detectSource, detectCollection, extractVideoId, extractAppleEpisodeId, cleanWebUrl, findExistingNote, MediaSource, CollectionSource } from "./url-utils";
 import { processSSEStream, ManualPasteRequiredError } from "./sse-handler";
+import { BatchPanel } from "./batch-panel";
+import type { BatchOptions } from "./batch-api";
+
+const MODEL_HAIKU = "claude-haiku-4-5";
+const MODEL_SONNET = "claude-sonnet-5";
+const MODEL_OPUS = "claude-opus-5-5";
 
 export class YouTubeImportModal extends Modal {
     plugin: YTObsidianPlugin;
@@ -29,6 +35,8 @@ export class YouTubeImportModal extends Modal {
     btnRow: HTMLElement;
     skipDuplicateCheck = false;
     detectedSource: MediaSource = null;
+    detectedCollection: CollectionSource = null;
+    batchPanel: BatchPanel;
 
     constructor(app: App, plugin: YTObsidianPlugin) {
         super(app);
@@ -68,7 +76,9 @@ export class YouTubeImportModal extends Modal {
         this.urlInput.style.marginTop = "4px";
 
         this.urlInput.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") this.startImport();
+            if (e.key !== "Enter") return;
+            if (this.detectedCollection) this.batchPanel.runPreview();
+            else this.startImport();
         });
         this.urlInput.addEventListener("input", () => {
             this.skipDuplicateCheck = false;
@@ -120,9 +130,9 @@ export class YouTubeImportModal extends Modal {
                 });
                 this.focusTopicWrapper.style.display = value === "focus_topic" ? "block" : "none";
                 if (value === "transcript") {
-                    this.modelSelect.value = "claude-haiku-4-5-20251001";
+                    this.modelSelect.value = MODEL_HAIKU;
                 } else {
-                    this.modelSelect.value = "claude-sonnet-4-6";
+                    this.modelSelect.value = MODEL_SONNET;
                 }
             });
             return btn;
@@ -154,9 +164,9 @@ export class YouTubeImportModal extends Modal {
         this.focusIncludeExtendedCheckbox.checked = false;
         this.focusIncludeExtendedCheckbox.addEventListener("change", () => {
             if (this.focusIncludeExtendedCheckbox.checked) {
-                this.modelSelect.value = "claude-opus-4-7";
+                this.modelSelect.value = MODEL_OPUS;
             } else {
-                this.modelSelect.value = "claude-sonnet-4-6";
+                this.modelSelect.value = MODEL_SONNET;
             }
         });
 
@@ -179,10 +189,10 @@ export class YouTubeImportModal extends Modal {
         this.modelSelect = modelWrapper.createEl("select", {
             cls: "dropdown",
         });
-        this.modelSelect.createEl("option", { text: "Haiku (fastest, cheapest)", value: "claude-haiku-4-5-20251001" });
-        this.modelSelect.createEl("option", { text: "Sonnet (balanced)", value: "claude-sonnet-4-6" });
-        this.modelSelect.createEl("option", { text: "Opus (highest quality)", value: "claude-opus-4-7" });
-        this.modelSelect.value = "claude-haiku-4-5-20251001";
+        this.modelSelect.createEl("option", { text: "Haiku (fastest, cheapest)", value: MODEL_HAIKU });
+        this.modelSelect.createEl("option", { text: "Sonnet (balanced)", value: MODEL_SONNET });
+        this.modelSelect.createEl("option", { text: "Opus (highest quality)", value: MODEL_OPUS });
+        this.modelSelect.value = MODEL_HAIKU;
 
         // Extract resources toggle
         const resourcesWrapper = contentEl.createDiv({ cls: "yt-obsidian-resources-wrapper" });
@@ -266,6 +276,15 @@ export class YouTubeImportModal extends Modal {
         this.manualTextInput.style.boxSizing = "border-box";
         this.manualTextInput.addEventListener("input", () => this.updatePasteStats());
 
+        // Batch import (channel / playlist / podcast show URLs)
+        this.batchPanel = new BatchPanel(contentEl, this.app, this.plugin, {
+            getUrl: () => this.urlInput.value.trim(),
+            getOptions: () => this.collectOptions(this.detectedCollection),
+            setStatus: (msg, type) => this.setStatus(msg, type),
+            setBusy: (busy) => this.setInputsDisabled(busy),
+            close: () => this.close(),
+        });
+
         // Progress bar
         const progressWrapper = contentEl.createDiv({ cls: "yt-obsidian-progress-wrapper" });
         progressWrapper.style.marginTop = "12px";
@@ -342,7 +361,17 @@ export class YouTubeImportModal extends Modal {
     refreshSourceUI() {
         if (this.manualPasteWrapper && this.isManualPasteActive()) this.hideManualPaste();
         this.detectedSource = detectSource(this.urlInput.value);
-        if (this.detectedSource === "youtube") {
+        this.detectedCollection = detectCollection(this.urlInput.value);
+        this.batchPanel.reset();
+        this.batchPanel.show(this.detectedCollection !== null);
+        this.importBtn.style.display = this.detectedCollection ? "none" : "";
+        if (this.detectedCollection) {
+            const isShow = this.detectedCollection === "podcast";
+            this.sourceBadgeEl.setText(isShow ? "Podcast show" : "Channel / Playlist");
+            this.sourceBadgeEl.style.backgroundColor = isShow ? "var(--color-purple)" : "var(--color-red)";
+            this.sourceBadgeEl.style.display = "";
+            this.podcastOptionsWrapper.style.display = isShow ? "flex" : "none";
+        } else if (this.detectedSource === "youtube") {
             this.sourceBadgeEl.setText("YouTube");
             this.sourceBadgeEl.style.backgroundColor = "var(--color-red)";
             this.sourceBadgeEl.style.display = "";
@@ -425,43 +454,16 @@ export class YouTubeImportModal extends Modal {
             return;
         }
 
-        this.importBtn.disabled = true;
-        this.urlInput.disabled = true;
-        this.modeToggleBtns.forEach((b) => (b.disabled = true));
-        this.modelSelect.disabled = true;
-        this.extractResourcesCheckbox.disabled = true;
-        this.focusTopicInput.disabled = true;
-        this.focusIncludeExtendedCheckbox.disabled = true;
-        this.whisperLanguageInput.disabled = true;
-        this.manualTextInput.disabled = true;
+        this.setInputsDisabled(true);
         this.setStatus("⏳ Connecting to backend…", "info");
 
         try {
             const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
-            const body: Record<string, string | boolean> = { url };
+            const body: Record<string, string | boolean> = { url, ...this.collectOptions(source) };
             if (source === "youtube") {
                 body.cookie_browser = "safari";
-            } else if (source === "podcast") {
-                body.whisper_language = this.whisperLanguageInput.value.trim() || "auto";
             } else if (manualText) {
                 body.manual_text = manualText;
-            }
-            if (this.importMode === "extended_summary") {
-                body.extended_summary = true;
-                body.include_transcript = false;
-                body.extended_model = this.modelSelect.value;
-            } else if (this.importMode === "focus_topic") {
-                body.focus_topic = this.focusTopicInput.value.trim();
-                body.include_transcript = false;
-                body.extended_model = this.modelSelect.value;
-                if (this.focusIncludeExtendedCheckbox.checked) {
-                    body.focus_include_extended = true;
-                }
-            } else {
-                body.model = this.modelSelect.value;
-            }
-            if (this.extractResourcesCheckbox.checked) {
-                body.extract_resources = true;
             }
 
             const response = await fetch(`${apiUrl}/process`, {
@@ -511,16 +513,46 @@ export class YouTubeImportModal extends Modal {
                 this.setDetail("");
             }
             this.progressWrapper.style.display = "none";
-            this.importBtn.disabled = false;
-            this.urlInput.disabled = false;
-            this.modeToggleBtns.forEach((b) => (b.disabled = false));
-            this.modelSelect.disabled = false;
-            this.extractResourcesCheckbox.disabled = false;
-            this.focusTopicInput.disabled = false;
-            this.focusIncludeExtendedCheckbox.disabled = false;
-            this.whisperLanguageInput.disabled = false;
-            this.manualTextInput.disabled = false;
+            this.setInputsDisabled(false);
         }
+    }
+
+    /** Output options shared by single imports and batches (a batch snapshots them). */
+    collectOptions(source: MediaSource | CollectionSource): BatchOptions {
+        const opts: BatchOptions = {};
+        if (source === "podcast") {
+            opts.whisper_language = this.whisperLanguageInput.value.trim() || "auto";
+        }
+        if (this.importMode === "extended_summary") {
+            opts.extended_summary = true;
+            opts.include_transcript = false;
+            opts.extended_model = this.modelSelect.value;
+        } else if (this.importMode === "focus_topic") {
+            opts.focus_topic = this.focusTopicInput.value.trim();
+            opts.include_transcript = false;
+            opts.extended_model = this.modelSelect.value;
+            if (this.focusIncludeExtendedCheckbox.checked) {
+                opts.focus_include_extended = true;
+            }
+        } else {
+            opts.model = this.modelSelect.value;
+        }
+        if (this.extractResourcesCheckbox.checked) {
+            opts.extract_resources = true;
+        }
+        return opts;
+    }
+
+    setInputsDisabled(disabled: boolean) {
+        this.importBtn.disabled = disabled;
+        this.urlInput.disabled = disabled;
+        this.modeToggleBtns.forEach((b) => (b.disabled = disabled));
+        this.modelSelect.disabled = disabled;
+        this.extractResourcesCheckbox.disabled = disabled;
+        this.focusTopicInput.disabled = disabled;
+        this.focusIncludeExtendedCheckbox.disabled = disabled;
+        this.whisperLanguageInput.disabled = disabled;
+        this.manualTextInput.disabled = disabled;
     }
 
     setStatus(msg: string, type: "info" | "success" | "warning" | "error") {

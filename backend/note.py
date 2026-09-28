@@ -190,6 +190,11 @@ def build_obsidian_note(
         f'published: "{view["published"]}"',
         f'duration: "{view["duration"]}"',
     ])
+    # Stable ids for duplicate detection (plugin + batch queue)
+    for key in ("youtube_id", "apple_episode_id", "episode_guid"):
+        value = metadata.get("video_id" if key == "youtube_id" else key)
+        if value:
+            fm_lines.append(f"{key}: {_yaml_str(value)}")
     if topics_yaml:
         fm_lines.append(topics_yaml.rstrip())
     fm_lines.append("tags:")

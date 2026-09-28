@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import time
 from contextlib import asynccontextmanager
 
@@ -7,15 +8,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
-from models import TranscriptRequest, CookieUpload
-from youtube import is_youtube_url, extract_video_id, get_video_metadata, get_transcript, transcript_to_plain_text
-from podcast import is_apple_podcast_url, resolve_episode, get_rss_transcript
+from models import TranscriptRequest, CookieUpload, BatchRequest, BatchOptions
+from youtube import (
+    is_youtube_url, extract_video_id, get_video_metadata, get_transcript, transcript_to_plain_text,
+    YouTubeBlockedError, LIVE_STATUSES, is_youtube_collection_url, list_collection,
+)
+from podcast import is_apple_podcast_url, resolve_episode, resolve_episode_by_guid, get_rss_transcript, is_apple_show_url, list_show_episodes
 from web import is_web_url, fetch_article, pasted_article, trim_to_body, set_word_count, WebFetchError, MAX_TEXT_CHARS
 import whisper as whisper_mod
 from whisper import transcribe_url as whisper_transcribe, WhisperUnavailableError, DEFAULT_SERVER_URL
 from note import build_obsidian_note
-from claude import stream_claude, parse_claude_response, VALID_MODELS, DEFAULT_MODEL, DEFAULT_EXTENDED_MODEL, MODEL_MAX_OUTPUT_TOKENS
+from claude import stream_claude, parse_claude_response, resolve_model, DEFAULT_MODEL, DEFAULT_EXTENDED_MODEL, HAIKU, SONNET, OPUS
 from cookies import has_cookies, save_cookies, delete_cookies
+import vault
+import batch_queue
 from prompts import get_system_prompt
 
 
@@ -49,15 +55,21 @@ async def _whisper_idle_watcher():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(_whisper_idle_watcher())
+    batch_queue.init_db()
+    tasks = [
+        asyncio.create_task(_whisper_idle_watcher()),
+        asyncio.create_task(batch_queue.run_worker(_process_batch_item)),
+    ]
     try:
         yield
     finally:
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 app = FastAPI(title="Media to Obsidian API", lifespan=lifespan)
@@ -142,14 +154,16 @@ def _sse_event(stage: str, message: str, **extra) -> str:
 
 # Pricing per million tokens (USD)
 MODEL_PRICING = {
-    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
-    "claude-sonnet-4-6":         {"input": 3.00, "output": 15.00},
-    "claude-opus-4-7":           {"input": 15.00, "output": 75.00},
+    HAIKU:  {"input": 1.00, "output": 5.00},
+    SONNET: {"input": 2.00, "output": 10.00},
+    OPUS:   {"input": 4.00, "output": 20.00},
 }
+
+REFUSAL_MESSAGE = "Claude declined to process this content (safety refusal)."
 
 
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    pricing = MODEL_PRICING.get(model, MODEL_PRICING[DEFAULT_MODEL])
+    pricing = MODEL_PRICING[resolve_model(model, DEFAULT_MODEL)]
     return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
 
 
@@ -209,9 +223,16 @@ def _run_youtube_pipeline(request: TranscriptRequest, total_steps: int):
     yield _sse_event("metadata", f"Step 1/{total_steps} — Fetching video metadata…",
                      step=1, total_steps=total_steps)
     try:
-        metadata = get_video_metadata(request.url, cookie_browser, cookie_file)
+        metadata = get_video_metadata(request.url, cookie_browser, cookie_file, request.sleep_requests)
+    except YouTubeBlockedError as e:
+        yield _sse_event("error", f"YouTube blocked the request: {e}", blocked=True)
+        return
     except Exception as e:
         yield _sse_event("error", f"Could not fetch video metadata: {e}")
+        return
+
+    if request.skip_live and metadata["live_status"] in LIVE_STATUSES:
+        yield _sse_event("error", f"Skipped: livestream ({metadata['live_status']})", skipped=True)
         return
 
     yield _sse_event(
@@ -224,7 +245,10 @@ def _run_youtube_pipeline(request: TranscriptRequest, total_steps: int):
     yield _sse_event("transcript", f"Step 2/{total_steps} — Fetching transcript…",
                      step=2, total_steps=total_steps)
     try:
-        entries, is_multi_speaker = get_transcript(video_id, cookie_browser, cookie_file)
+        entries, is_multi_speaker = get_transcript(video_id, cookie_browser, cookie_file, request.sleep_requests)
+    except YouTubeBlockedError as e:
+        yield _sse_event("error", f"YouTube blocked the request: {e}", blocked=True)
+        return
     except HTTPException as e:
         yield _sse_event("error", e.detail)
         return
@@ -260,7 +284,10 @@ def _run_podcast_pipeline(request: TranscriptRequest, total_steps: int):
     yield _sse_event("metadata", f"Step 1/{total_steps} — Resolving Apple Podcasts URL…",
                      step=1, total_steps=total_steps)
     try:
-        metadata, match_info = resolve_episode(request.url)
+        if request.episode_guid:
+            metadata, match_info = resolve_episode_by_guid(request.url, request.episode_guid)
+        else:
+            metadata, match_info = resolve_episode(request.url)
     except ValueError as e:
         yield _sse_event("error", str(e))
         return
@@ -444,9 +471,10 @@ def _run_claude_and_note(
 
     use_extended_model = request.extended_summary or bool(request.focus_topic) or request.focus_include_extended
     if use_extended_model:
-        model = request.extended_model if request.extended_model in VALID_MODELS else DEFAULT_EXTENDED_MODEL
+        model = resolve_model(request.extended_model, DEFAULT_EXTENDED_MODEL)
     else:
-        model = request.model if request.model in VALID_MODELS else DEFAULT_MODEL
+        model = resolve_model(request.model, DEFAULT_MODEL)
+    effort = "medium" if use_extended_model else "low"
     if request.focus_topic:
         stage_label = "claude_focus"
     elif request.extended_summary:
@@ -457,7 +485,7 @@ def _run_claude_and_note(
     use_chunks = (
         source != "web"
         and not use_extended_model
-        and model == "claude-haiku-4-5-20251001"
+        and model == HAIKU
         and transcript_chars > _CHUNK_THRESHOLD_CHARS
     )
 
@@ -487,8 +515,11 @@ def _run_claude_and_note(
             )
             raw_chunk = None
             try:
-                for update in stream_claude(model, _CHUNK_CLEAN_SYSTEM, chunk_user):
+                for update in stream_claude(model, _CHUNK_CLEAN_SYSTEM, chunk_user, effort):
                     if update["type"] == "done":
+                        if update["stop_reason"] == "refusal":
+                            yield _sse_event("error", f"{REFUSAL_MESSAGE} (chunk {i + 1})")
+                            return
                         raw_chunk = update["response"]
                         total_in_tokens += update["input_tokens"]
                         total_out_tokens += update["output_tokens"]
@@ -523,8 +554,11 @@ def _run_claude_and_note(
         summary_raw = None
         chunk_summary_system = _build_chunk_summary_system(request.extract_resources, source)
         try:
-            for update in stream_claude(model, chunk_summary_system, summary_user):
+            for update in stream_claude(model, chunk_summary_system, summary_user, effort):
                 if update["type"] == "done":
+                    if update["stop_reason"] == "refusal":
+                        yield _sse_event("error", REFUSAL_MESSAGE)
+                        return
                     summary_raw = update["response"]
                     total_in_tokens += update["input_tokens"]
                     total_out_tokens += update["output_tokens"]
@@ -617,7 +651,7 @@ Please process this transcript according to the instructions."""
 
         raw_response = None
         try:
-            for update in stream_claude(model, system_prompt, user_message):
+            for update in stream_claude(model, system_prompt, user_message, effort):
                 if update["type"] == "progress":
                     elapsed = _fmt_elapsed(update["elapsed"])
                     in_tok = _fmt_tokens(update["input_tokens"])
@@ -634,6 +668,9 @@ Please process this transcript according to the instructions."""
                         elapsed=round(update["elapsed"], 1),
                     )
                 elif update["type"] == "done":
+                    if update["stop_reason"] == "refusal":
+                        yield _sse_event("error", REFUSAL_MESSAGE)
+                        return
                     raw_response = update["response"]
                     elapsed = _fmt_elapsed(update["elapsed"])
                     in_tok = _fmt_tokens(update["input_tokens"])
@@ -705,6 +742,214 @@ Please process this transcript according to the instructions."""
 
 def _title_label(source: str) -> str:
     return {"podcast": "Episode", "web": "Article"}.get(source, "Video")
+
+
+# ─── Batch queue (channels, playlists, podcast shows) ───────────────────────
+
+BATCH_ALL_LIMIT = 20            # "all" is only offered for collections of up to 20 items
+BATCH_MAX_COUNT = 200
+BATCH_YOUTUBE_SLEEP_REQUESTS = 0.75
+
+# Cost estimate heuristics (calibrate against the recorded cost_usd of real batches)
+EST_TOKENS_PER_MINUTE = 200     # ≈ 150 spoken words/min × 1.3 tokens/word
+EST_CHARS_PER_MINUTE = 830
+EST_SYSTEM_TOKENS = 2_000
+EST_SUMMARY_OUTPUT_TOKENS = 3_000
+EST_CHUNK_OVERHEAD_TOKENS = 600  # per chunk: system prompt + heading/JSON wrapper
+EST_THINKING_HEADROOM = 1.2      # Sonnet 5 / Opus 5.5 bill thinking as output
+EST_SPREAD = 0.3
+
+
+def _batch_model(opts: BatchOptions) -> tuple[str, bool]:
+    use_extended = opts.extended_summary or bool(opts.focus_topic) or opts.focus_include_extended
+    if use_extended:
+        return resolve_model(opts.extended_model, DEFAULT_EXTENDED_MODEL), True
+    return resolve_model(opts.model, DEFAULT_MODEL), False
+
+
+def _estimate_item_cost(duration_s: int, opts: BatchOptions) -> float:
+    model, use_extended = _batch_model(opts)
+    minutes = max(duration_s, 60) / 60
+    transcript = minutes * EST_TOKENS_PER_MINUTE
+    inp = transcript + EST_SYSTEM_TOKENS
+    out = EST_SUMMARY_OUTPUT_TOKENS * (2 if use_extended else 1)
+    if opts.include_transcript:
+        out += transcript
+    chars = minutes * EST_CHARS_PER_MINUTE
+    if model == HAIKU and not use_extended and chars > _CHUNK_THRESHOLD_CHARS:
+        n_chunks = math.ceil(chars / _CHUNK_CHARS)
+        inp += n_chunks * EST_CHUNK_OVERHEAD_TOKENS + min(transcript, 10_000)  # + summary call
+        out += n_chunks * 50
+    if model != HAIKU:
+        out *= EST_THINKING_HEADROOM
+    return _estimate_cost(model, int(inp), int(out))
+
+
+@app.post("/batch")
+async def batch_create(req: BatchRequest):
+    """List + filter + dedup + estimate. The batch waits for /confirm (expires after 30 min)."""
+    if is_youtube_collection_url(req.url):
+        source, lister = "youtube", list_collection
+    elif is_apple_show_url(req.url):
+        source, lister = "podcast", list_show_episodes
+    else:
+        raise HTTPException(400, "Not a YouTube channel / playlist or an Apple Podcasts show URL.")
+    try:
+        vault.validate_paths(req.vault_root, [req.folders.youtube, req.folders.podcast, req.folders.resources, *req.scan_roots])
+    except vault.VaultPathError as e:
+        raise HTTPException(400, str(e))
+
+    limit = min(req.count or BATCH_ALL_LIMIT, BATCH_MAX_COUNT)
+    try:
+        listing = await asyncio.to_thread(lister, req.url, limit, max(req.min_minutes, 0) * 60)
+    except YouTubeBlockedError as e:
+        raise HTTPException(429, f"YouTube blocked the request: {e}")
+    except Exception as e:
+        raise HTTPException(502, f"Could not list {'videos' if source == 'youtube' else 'episodes'}: {e}")
+
+    known = set(req.known_ids) | await asyncio.to_thread(vault.scan_ids, req.scan_roots)
+    model, _ = _batch_model(req.options)
+    items, new_items = [], []
+    for it in listing["items"]:
+        external_id = it["video_id"] if source == "youtube" else it["apple_episode_id"]
+        guid = it.get("episode_guid")
+        item = {
+            "url": it["url"],
+            "external_id": external_id,
+            "guid": guid,
+            "title": it["title"],
+            "duration_seconds": it["duration_seconds"],
+            "duration_estimated": it.get("duration_estimated", False),
+            "duplicate": external_id in known or (guid in known if guid else False),
+            "cost_estimate": round(_estimate_item_cost(it["duration_seconds"], req.options), 4),
+        }
+        items.append(item)
+        if not item["duplicate"]:
+            new_items.append(item)
+
+    total = sum(i["cost_estimate"] for i in new_items)
+    estimate = {
+        "model": model,
+        "total": round(total, 4),
+        "low": round(total * (1 - EST_SPREAD), 4),
+        "high": round(total * (1 + EST_SPREAD), 4),
+    }
+    batch_id = None
+    if new_items:
+        batch_id = batch_queue.create_batch(
+            source, req.url, listing["title"], req.options.model_dump(),
+            {"vault_root": req.vault_root, "folders": req.folders.model_dump(), "scan_roots": req.scan_roots},
+            estimate, new_items,
+        )
+    return {
+        "batch_id": batch_id,
+        "source": source,
+        "title": listing["title"],
+        "items": items,
+        "estimate": estimate,
+        "has_more": listing["has_more"],
+        "capped": listing.get("capped", False) or (req.count or 0) > BATCH_MAX_COUNT,
+        "count_requested": req.count,
+        "expires_in_seconds": batch_queue.CONFIRM_TIMEOUT_SECONDS,
+    }
+
+
+@app.post("/batch/{batch_id}/confirm")
+async def batch_confirm(batch_id: str):
+    if not batch_queue.confirm(batch_id):
+        raise HTTPException(409, "Batch not found, already started, or expired — preview it again.")
+    return batch_queue.get_batch(batch_id)
+
+
+@app.post("/batch/{batch_id}/cancel")
+async def batch_cancel(batch_id: str):
+    if not batch_queue.cancel(batch_id):
+        raise HTTPException(409, "Batch not found or already finished.")
+    return batch_queue.get_batch(batch_id)
+
+
+@app.post("/batch/{batch_id}/retry")
+async def batch_retry(batch_id: str):
+    return {"retried": batch_queue.retry_failed(batch_id)}
+
+
+@app.post("/batch/lanes/{lane}/resume")
+async def batch_lane_resume(lane: str):
+    """Lift a block early (e.g. after changing networks)."""
+    if lane not in batch_queue.LANES:
+        raise HTTPException(404, "Unknown lane.")
+    batch_queue.clear_block(lane)
+    return batch_queue.lane_status()
+
+
+@app.get("/batch")
+async def batch_list(limit: int = 10):
+    return {"batches": batch_queue.list_batches(limit), "lanes": batch_queue.lane_status(), "now": time.time()}
+
+
+@app.get("/batch/{batch_id}")
+async def batch_get(batch_id: str):
+    batch = batch_queue.get_batch(batch_id)
+    if batch is None:
+        raise HTTPException(404, "Batch not found.")
+    return batch
+
+
+def _run_batch_pipeline(request: TranscriptRequest, source: str, item_id: int) -> dict:
+    pipeline = _run_youtube_pipeline if source == "youtube" else _run_podcast_pipeline
+    cost = 0.0
+    last_progress = 0.0
+    for raw in pipeline(request, 4):
+        event = json.loads(raw)
+        stage = event["stage"]
+        if stage == "claude_done":
+            cost += event.get("cost_usd") or 0
+        elif stage == "error":
+            return {
+                "state": "skipped" if event.get("skipped") else "failed",
+                "error": event["message"],
+                "blocked": event.get("blocked", False),
+                "cost_usd": round(cost, 4) or None,
+            }
+        elif stage == "done":
+            return {"state": "done", "done": event, "cost_usd": round(cost, 4)}
+        if event.get("message") and time.time() - last_progress >= 1:
+            batch_queue.set_progress(item_id, event["message"])
+            last_progress = time.time()
+    return {"state": "failed", "error": "Pipeline ended without a result."}
+
+
+def _process_batch_item(item: dict, batch: dict) -> dict:
+    """Runs in the queue worker's thread. Writes the finished note straight into the vault."""
+    cfg = batch["vault"]
+    ids = {item["external_id"], item["guid"]} - {None, ""}
+    # Re-check right before the work: the same item may have been imported manually meanwhile
+    if ids & vault.scan_ids(cfg["scan_roots"]):
+        return {"state": "duplicate", "error": "Already in the vault.", "network": False}
+
+    source = item["source"]
+    request = TranscriptRequest(
+        url=item["url"],
+        **batch["options"],
+        skip_live=True,
+        episode_guid=item["guid"],
+        sleep_requests=BATCH_YOUTUBE_SLEEP_REQUESTS if source == "youtube" else 0,
+    )
+    result = _run_batch_pipeline(request, source, item["id"])
+    if result.get("blocked") and source == "youtube":
+        # Guest session first; account cookies only as a fallback after a bot check
+        batch_queue.set_progress(item["id"], "Blocked as guest — retrying once with browser cookies…")
+        result = _run_batch_pipeline(request.model_copy(update={"cookie_browser": "safari"}), source, item["id"])
+    if result["state"] != "done":
+        return result
+
+    done = result.pop("done")
+    folders = cfg["folders"]
+    result["note_path"] = vault.write_note(folders[source], done["filename"], done["content"])
+    names = [r.get("name", "") for r in done.get("resources") or []]
+    if names:
+        vault.create_resource_stubs(folders["resources"], names)
+    return result
 
 
 # ─── Cookies & health ────────────────────────────────────────────────────────

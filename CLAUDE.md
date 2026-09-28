@@ -2,12 +2,12 @@
 
 ## Project Overview
 
-A full-stack app that imports YouTube videos, Apple Podcasts episodes **and** web articles into Obsidian as structured notes. The plugin auto-detects the source from the pasted URL, fetches transcripts (RSS / YouTube CC / whisper.cpp) or the article's main text, processes them with Claude AI (summary + cleaned transcript + topics + optional resources/extended/focused summaries; articles get summary + key points + knowledge-base frontmatter instead of a transcript), and creates formatted markdown notes.
+A full-stack app that imports YouTube videos, Apple Podcasts episodes **and** web articles into Obsidian as structured notes — one URL at a time, or whole channels / playlists / podcast shows through a persistent backend batch queue. The plugin auto-detects the source from the pasted URL, fetches transcripts (RSS / YouTube CC / whisper.cpp) or the article's main text, processes them with Claude AI (summary + cleaned transcript + topics + optional resources/extended/focused summaries; articles get summary + key points + knowledge-base frontmatter instead of a transcript), and creates formatted markdown notes.
 
 - **Frontend:** TypeScript Obsidian plugin (`obsidian-plugin/`)
 - **Backend:** Python FastAPI with SSE streaming (`backend/`)
 - **Deployment:** macOS LaunchAgents (uvicorn + whisper-server, managed via `backend/scripts/`)
-- **AI:** Anthropic Claude API (Sonnet 4.6 / Opus 4.7 / Haiku 4.5)
+- **AI:** Anthropic Claude API (Haiku 4.5 / Sonnet 5 / Opus 5.5; effort `low` for base, `medium` for extended/focus)
 - **Local STT:** whisper.cpp via local HTTP server (Apple Silicon, Metal-accelerated)
 
 ## Code Style
@@ -27,13 +27,15 @@ Each file has a single responsibility. Do not merge concerns across modules.
 |---|---|---|
 | `main.py` | FastAPI app, routes, URL-source branching, SSE event generation | all other modules |
 | `models.py` | Pydantic request/response models | — |
-| `youtube.py` | Video ID extraction, metadata (yt-dlp), transcript fetching (youtube-transcript-api + yt-dlp fallback) | `cookies` |
-| `podcast.py` | Apple URL parsing, iTunes lookup, RSS fetch (`feedparser`), episode matching, RSS transcript extractor (Podcasting 2.0) | — |
+| `youtube.py` | Video ID extraction, metadata (yt-dlp), transcript fetching (youtube-transcript-api 1.x + yt-dlp fallback), `YouTubeBlockedError` on bot checks / IP blocks, channel + playlist listing (`list_collection`) | `cookies` |
+| `podcast.py` | Apple URL parsing, iTunes lookup, RSS fetch (`feedparser`), episode matching (slug, or guid in batch mode), RSS transcript extractor (Podcasting 2.0), show listing (`list_show_episodes`) | — |
 | `whisper.py` | Local whisper-server HTTP client. Downloads audio → POSTs to `whisper-server` → returns transcript | — |
 | `web.py` | Web article fetch (HTML only — no images/scripts/linked pages), accessibility checks, main-text + metadata extraction via `trafilatura`, URL cleaning | — |
 | `claude.py` | Claude API streaming, response parsing, model constants | — |
 | `note.py` | Source-agnostic Obsidian markdown note assembly (YouTube + podcast variants, separate web article layout) | — |
 | `cookies.py` | Cookie file persistence (save/delete/check) | — |
+| `vault.py` | Batch queue writes into the vault: path validation, atomic note write + collision suffix, resource stubs, frontmatter id scan | — |
+| `batch_queue.py` | SQLite job table (`backend/data/batch.db`) + the single asyncio worker; lanes, pacing, hourly cap, block backoff. The per-item work is injected by `main.py` | — |
 | `prompts/__init__.py` | Source-aware prompt registry and composition engine | prompt feature modules |
 | `prompts/base.py` | Base prompt: transcript cleaning + short summary + topics | — |
 | `prompts/pasted.py` | Added with `article` when the user pasted the page text by hand: recovers `title`, `authors`, `published` and the verbatim `body_first_words` / `body_last_words` so the backend can trim page clutter | — |
@@ -43,7 +45,7 @@ Each file has a single responsibility. Do not merge concerns across modules.
 | `prompts/resources.py` | Resources prompt: extract products/tools/services as wiki-link stubs | — |
 
 **Rules:**
-- `youtube.py`, `podcast.py`, `whisper.py`, `web.py`, `claude.py`, `note.py`, and `cookies.py` must NOT import from each other. They are independent modules orchestrated only by `main.py`.
+- `youtube.py`, `podcast.py`, `whisper.py`, `web.py`, `claude.py`, `note.py`, `cookies.py`, `vault.py` and `batch_queue.py` must NOT import from each other. They are independent modules orchestrated only by `main.py`.
 - `models.py` contains only Pydantic models — no logic.
 - Prompt modules expose only `ROLE_PREAMBLE`, `JSON_KEYS`, and `RULES` — no functions.
 - The prompt composer (`prompts.get_system_prompt`) takes a `source` argument (`"youtube"`, `"podcast"` or `"web"`) so the same feature flags work for all sources — the wording adapts. For `"web"` it swaps `base` for `article`.
@@ -58,13 +60,16 @@ Modular TypeScript plugin with one file per concern:
 | `settings.ts` | `YTObsidianSettings` interface, `DEFAULT_SETTINGS`, `YTObsidianSettingTab` (settings UI: parent-folder toggle + name, per-source folder names, whisper language, cookie management) | `main` (type only) |
 | `import-modal.ts` | `YouTubeImportModal` — single modal that auto-detects source, adapts UI, builds the request, displays progress | `main` (type only), `url-utils`, `sse-handler` |
 | `sse-handler.ts` | `processSSEStream()` — SSE parsing + dispatch via callbacks. Knows about all stages (incl. `transcript_rss`, `transcript_whisper_download`, `transcript_whisper_running`) | — |
-| `url-utils.ts` | `detectSource()` (YouTube vs Apple Podcasts vs web vs null), `extractVideoId()`, `extractAppleEpisodeId/ShowId()`, `cleanWebUrl()` (mirror of `web.clean_url`), `findExistingNote()` | — |
+| `url-utils.ts` | `detectSource()` (YouTube vs Apple Podcasts vs web vs null), `detectCollection()` (channel / playlist / show — mirror of the backend detectors), `extractVideoId()`, `extractAppleEpisodeId/ShowId()`, `cleanWebUrl()` (mirror of `web.clean_url`), `collectKnownIds()` + `findExistingNote()` (frontmatter ids via `metadataCache`, content scan as fallback) | — |
+| `batch-api.ts` | Types + fetch helpers for the `/batch` endpoints | — |
+| `batch-panel.ts` | `BatchPanel` — batch section of the Import modal (count, min length, preview + cost estimate, confirm) | `main` (type only), `url-utils`, `batch-api` |
+| `queue-view.ts` | `QueueView` — sidebar that polls `GET /batch` (progress, lane status, cancel / retry / resume) | `main` (type only), `batch-api` |
 
 **Rules:**
-- `sse-handler.ts` and `url-utils.ts` are pure modules with no plugin dependencies — they must not import from `main`, `settings`, or `import-modal`.
-- `settings.ts` and `import-modal.ts` import `main.ts` only as a type (`import type`) to avoid circular runtime dependencies.
+- `sse-handler.ts`, `url-utils.ts` and `batch-api.ts` are pure modules with no plugin dependencies — they must not import from `main`, `settings`, or `import-modal`.
+- `settings.ts`, `import-modal.ts`, `batch-panel.ts` and `queue-view.ts` import `main.ts` only as a type (`import type`) to avoid circular runtime dependencies.
 - SSE event stage handling lives in `sse-handler.ts`. When adding new SSE stages, update the switch statement there (not in `import-modal.ts`).
-- Folder layout is configurable: `youtubeFolder`, `podcastFolder`, `articleFolder` and the shared `resourcesFolder` (defaults `YouTube`, `Podcasts`, `Articles`, `Mentioned_Resources`). With `useParentFolder` on (default) they live below `mediaTranscriptsFolder` (default `MEDIA_Transcripts`); off, they are siblings in the vault root. Empty names fall back to the defaults. Resolve paths only via `plugin.folderForSource()` / `plugin.resourceFolder()`.
+- Folder layout is configurable: `youtubeFolder`, `podcastFolder`, `articleFolder` and the shared `resourcesFolder` (defaults `YouTube`, `Podcasts`, `Articles`, `Mentioned_Resources`). With `useParentFolder` on (default) they live below `mediaTranscriptsFolder` (default `MEDIA_Transcripts`); off, they are siblings in the vault root. Empty names fall back to the defaults. Resolve paths only via `plugin.folderForSource()` / `plugin.resourceFolder()` (and `plugin.batchTargets()` for the absolute paths sent with a batch).
 - The plugin id stays `youtube-to-obsidian` (no breakage in existing vaults). The display name is "Media to Obsidian".
 
 ### Communication
@@ -75,6 +80,9 @@ Frontend ↔ Backend communicate via:
 - `GET /whisper/status` — Reports whether whisper-server is running, plus `last_activity`, `in_flight`, `idle_timeout_seconds`
 - `POST /whisper/start` — Kickstart the whisper-server LaunchAgent (blocks until reachable, ~1–3 s). Idempotent.
 - `POST /whisper/stop` — `launchctl kill SIGTERM` the LaunchAgent. Refuses if a transcription is in-flight.
+- `POST /batch` — list + filter + dedup + estimate a channel / playlist / show; creates a `pending_confirmation` batch (expires after 30 min)
+- `POST /batch/{id}/confirm` · `/cancel` · `/retry` (failed items) · `POST /batch/lanes/{lane}/resume` (lift a block early)
+- `GET /batch` (recent batches + item states + lane status) · `GET /batch/{id}`
 - `GET /health` — Health check
 
 ## URL detection
@@ -92,6 +100,13 @@ The `/process` endpoint runs a 4-step SSE streaming pipeline. Steps 1–2 differ
 2. **Transcript** — `youtube.get_transcript()` via youtube-transcript-api, falls back to yt-dlp
 3. **Claude** — `claude.stream_claude()` with `prompts.get_system_prompt(features, source="youtube")`
 4. **Note** — `note.build_obsidian_note()` assembles the final markdown
+
+### Batch queue (channels, playlists, podcast shows)
+1. **Preview** — `POST /batch`: `youtube.list_collection()` (flat yt-dlp listing of the `/videos` tab or a playlist — durations included, Shorts and `duration=None` dropped) or `podcast.list_show_episodes()` (iTunes `entity=podcastEpisode` → `trackId` + `episodeGuid`, joined to the RSS feed by guid; max 200; missing durations are estimated from the show's median). Items whose ids are in `known_ids` (plugin, `metadataCache`) or `vault.scan_ids()` are marked duplicate. Per-item cost comes from `_estimate_item_cost()` (duration heuristic, constants at the top of the batch section in `main.py`).
+2. **Confirm** — the batch becomes `queued`; the worker in `lifespan` picks it up.
+3. **Worker** — one item at a time via `_process_batch_item()`: re-scan the vault for the id → run the normal `_run_youtube_pipeline` / `_run_podcast_pipeline` generator (with `skip_live`, `episode_guid`, `sleep_requests`) → `vault.write_note()` + `vault.create_resource_stubs()`. The backend is the note writer here (the plugin sends absolute paths; `vault.validate_paths` keeps writes inside the vault).
+4. **Pacing** — YouTube lane: random 15–45 s pause, ≤ 60 items/hour, guest session first (one retry with Safari cookies after a bot check). An `error` event with `blocked=True` pauses the lane 30 min → 2 h → 6 h and returns the item to pending; podcasts keep going. Livestreams yield `skipped=True`.
+5. **Recovery** — `init_db()` resets `running` items to `pending` on start.
 
 ### Web article pipeline
 1. **Fetch** — `web.fetch_article()` GETs the HTML document only (Safari UA, redirects followed, 20 s timeout, 5 MB cap). Clear errors for 401/403/404/429, non-HTML content types and unreachable hosts.
@@ -225,7 +240,7 @@ Events are JSON objects with at minimum `stage` and `message` fields.
 | `claude_done` | Step 3 complete | `input_tokens`, `output_tokens`, `elapsed`, `cost_usd` |
 | `building` | Step 4 progress | `step`, `total_steps` |
 | `done` | Final result | `filename`, `content`, `metadata`, `resources`, `source` (`"youtube"`/`"podcast"`/`"web"`) |
-| `error` | Failure at any point | — |
+| `error` | Failure at any point | `blocked` (YouTube bot check / IP block), `skipped` (livestream with `skip_live`) — read by the batch queue |
 
 ## Cookie Handling (YouTube only)
 
@@ -244,4 +259,6 @@ Podcasts don't need cookies — RSS feeds are public.
 - Token counting in `claude.py` is approximate during streaming (1 delta ≈ 1 token) but corrected by `message_delta` at the end.
 - The `metadata` dict for podcasts contains a `rss_entry` field (a feedparser object). It is NOT JSON-serializable — `_run_podcast_pipeline` strips it before sending the `done` event. Don't add it back unless you also strip it before serialization.
 - The ribbon icon is a bundled SVG registered with `addIcon()` — don't switch it back to a Lucide id; renamed Lucide ids render as an invisible (but clickable) ribbon button.
-- Apple Podcasts episode resolution: do NOT match by `?i=` value against RSS `guid` or `itunes:episode` — those are different namespaces. Use the redirect-based slug match in `podcast.resolve_canonical_slug()`.
+- Apple Podcasts episode resolution: do NOT compare the `?i=` value directly with the RSS `guid` or `itunes:episode` — those are different namespaces. Single imports use the redirect-based slug match in `podcast.resolve_canonical_slug()`; batch mode bridges the two via the iTunes episode lookup (`trackId` → `episodeGuid`) and `resolve_episode_by_guid()`.
+- Frontmatter id keys (`youtube_id`, `apple_episode_id`, `episode_guid`) drive duplicate detection in the plugin and in `vault.scan_ids()`. Legacy notes without them are matched by parsing ids out of `url:` — keep both parsers in sync.
+- Claude calls: `claude.resolve_model()` maps old plugin model ids to the current ones. Thinking is on by default for Sonnet 5 / Opus 5.5; `stream_claude()` appends only `text_delta`s and passes `output_config.effort` (never on Haiku). `stop_reason == "refusal"` becomes an SSE `error`.
