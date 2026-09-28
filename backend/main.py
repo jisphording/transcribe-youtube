@@ -8,8 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
 from models import TranscriptRequest, CookieUpload
-from youtube import extract_video_id, get_video_metadata, get_transcript, transcript_to_plain_text
+from youtube import is_youtube_url, extract_video_id, get_video_metadata, get_transcript, transcript_to_plain_text
 from podcast import is_apple_podcast_url, resolve_episode, get_rss_transcript
+from web import is_web_url, fetch_article, WebFetchError, MAX_TEXT_CHARS
 import whisper as whisper_mod
 from whisper import transcribe_url as whisper_transcribe, WhisperUnavailableError, DEFAULT_SERVER_URL
 from note import build_obsidian_note
@@ -165,17 +166,27 @@ def _fmt_elapsed(seconds: float) -> str:
     return f"{s}s"
 
 
+def _detect_source(url: str) -> str:
+    if is_apple_podcast_url(url):
+        return "podcast"
+    if is_youtube_url(url) or not is_web_url(url):
+        return "youtube"
+    return "web"
+
+
 @app.post("/process")
 async def process_media(request: TranscriptRequest):
-    source = "podcast" if is_apple_podcast_url(request.url) else "youtube"
+    source = _detect_source(request.url)
     total_steps = 4
 
     def event_generator():
         try:
             if source == "youtube":
                 yield from _run_youtube_pipeline(request, total_steps)
-            else:
+            elif source == "podcast":
                 yield from _run_podcast_pipeline(request, total_steps)
+            else:
+                yield from _run_web_pipeline(request, total_steps)
         except Exception as e:
             yield _sse_event("error", f"Unexpected error: {e}")
 
@@ -347,6 +358,48 @@ def _run_podcast_pipeline(request: TranscriptRequest, total_steps: int):
     )
 
 
+# ─── Web article pipeline ───────────────────────────────────────────────────
+
+def _run_web_pipeline(request: TranscriptRequest, total_steps: int):
+    # Step 1: Fetch the HTML document only (no images, scripts or linked pages)
+    yield _sse_event("web_fetch", f"Step 1/{total_steps} — Fetching page (text only)…",
+                     step=1, total_steps=total_steps)
+    try:
+        metadata, text = fetch_article(request.url)
+    except WebFetchError as e:
+        yield _sse_event("error", f"Page not accessible: {e}")
+        return
+    except Exception as e:
+        yield _sse_event("error", f"Could not fetch page: {e}")
+        return
+
+    byline = f" · {', '.join(metadata['authors'])}" if metadata["authors"] else ""
+    yield _sse_event(
+        "metadata_done",
+        f"Step 1/{total_steps} — Page accessible: {metadata['site']}{byline}",
+        step=1, total_steps=total_steps,
+    )
+
+    note = f" (truncated to first {MAX_TEXT_CHARS:,} chars)" if metadata["truncated"] else ""
+    yield _sse_event(
+        "web_extract_done",
+        f"Step 2/{total_steps} — Extracted \"{metadata['title']}\" — {metadata['word_count']:,} words{note}",
+        step=2, total_steps=total_steps,
+        words=metadata["word_count"], transcript_chars=len(text),
+    )
+
+    # Steps 3 + 4 (shared)
+    yield from _run_claude_and_note(
+        request=request,
+        metadata=metadata,
+        raw_text=text,
+        is_multi_speaker=False,
+        source="web",
+        transcript_source_label="",
+        total_steps=total_steps,
+    )
+
+
 # ─── Shared Claude + note assembly ───────────────────────────────────────────
 
 def _run_claude_and_note(
@@ -381,7 +434,8 @@ def _run_claude_and_note(
         stage_label = "claude"
 
     use_chunks = (
-        not use_extended_model
+        source != "web"
+        and not use_extended_model
         and model == "claude-haiku-4-5-20251001"
         and transcript_chars > _CHUNK_THRESHOLD_CHARS
     )
@@ -478,14 +532,18 @@ def _run_claude_and_note(
         transcript_md = combined_cleaned
         extended_summary = ""
         focused_summary = ""
+        article_info = None
 
     else:
         system_prompt = get_system_prompt(features, source=source)
 
-        task_desc = "summary + extended summary + transcript" if request.extended_summary else "summary + transcript"
+        if source == "web":
+            task_desc = "summary + extended summary" if request.extended_summary else "summary"
+        else:
+            task_desc = "summary + extended summary + transcript" if request.extended_summary else "summary + transcript"
         yield _sse_event(
             stage_label,
-            f"Step 3/{total_steps} — Sending to Claude ({model.split('-')[-1].capitalize()})… Processing {task_desc}",
+            f"Step 3/{total_steps} — Sending to Claude ({model.split('-')[1].capitalize()})… Processing {task_desc}",
             step=3, total_steps=total_steps,
         )
 
@@ -502,6 +560,18 @@ Multi-speaker detected: {is_multi_speaker}{focus_line}
 --- END TRANSCRIPT ---
 
 Please process this transcript according to the instructions."""
+        elif source == "web":
+            user_message = f"""Article Title: {metadata['title']}
+Author: {', '.join(metadata['authors']) or 'unknown'}
+Site: {metadata['site']}
+Published: {metadata['published'] or 'unknown'}
+Description: {metadata['description']}{focus_line}
+
+--- ARTICLE TEXT ---
+{raw_text}
+--- END ARTICLE TEXT ---
+
+Please process this article according to the instructions."""
         else:
             user_message = f"""Episode Title: {metadata['title']}
 Show: {metadata.get('show', '')}
@@ -568,6 +638,12 @@ Please process this transcript according to the instructions."""
         extended_summary = result.get("extended_summary", "") if (request.extended_summary or request.focus_include_extended) else ""
         focused_summary = result.get("focused_summary", "") if request.focus_topic else ""
         transcript_md = result.get("transcript", "")
+        article_info = {
+            "tldr": result.get("tldr", ""),
+            "key_points": result.get("key_points", []),
+            "content_type": result.get("content_type", ""),
+            "useful_for": result.get("useful_for", []),
+        } if source == "web" else None
 
     # Step 4: Build note
     yield _sse_event("building", f"Step 4/{total_steps} — Building Obsidian note…",
@@ -581,6 +657,7 @@ Please process this transcript according to the instructions."""
         topics=topics,
         resources=resources,
         transcript_source_label=transcript_source_label,
+        article_info=article_info,
     )
 
     yield _sse_event(
@@ -591,7 +668,7 @@ Please process this transcript according to the instructions."""
 
 
 def _title_label(source: str) -> str:
-    return "Episode" if source == "podcast" else "Video"
+    return {"podcast": "Episode", "web": "Article"}.get(source, "Video")
 
 
 # ─── Cookies & health ────────────────────────────────────────────────────────

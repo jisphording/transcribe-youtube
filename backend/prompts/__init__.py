@@ -20,6 +20,11 @@ PROMPTS = {
         "description": "Clean transcript with short 3-5 sentence summary",
         "module": "prompts.base",
     },
+    "article": {
+        "name": "Article Summary",
+        "description": "Summary + key points + knowledge-base metadata for web articles (replaces base)",
+        "module": "prompts.article",
+    },
     "extended": {
         "name": "Extended Summary",
         "description": "Topic-by-topic editorial rewrite",
@@ -49,19 +54,24 @@ SOURCE_TERMS = {
         "noun": "episode",
         "metadata_line": "- Episode metadata (title, show, description)",
     },
+    "web": {
+        "kind": "web article",
+        "noun": "article",
+        "metadata_line": "- Article metadata (title, author, site, date, description)",
+    },
 }
 
 
 def get_system_prompt(features: list[str], source: str = "youtube") -> str:
     """Build a composite system prompt from selected feature keys.
 
-    Always includes 'base'. Additional features add their role preambles,
-    JSON keys, and rules sections to the final prompt. The `source` parameter
-    swaps the wording so the model knows whether the transcript is from a
-    video or a podcast episode.
+    Always includes 'base' ('article' for web sources). Additional features
+    add their role preambles, JSON keys, and rules sections to the final
+    prompt. The `source` parameter swaps the wording so the model knows
+    whether the input is a video, a podcast episode or a web article.
     """
-    if "base" not in features:
-        features = ["base"] + features
+    base = "article" if source == "web" else "base"
+    features = [base] + [f for f in features if f not in ("base", "article")]
 
     terms = SOURCE_TERMS.get(source, SOURCE_TERMS["youtube"])
 
@@ -81,7 +91,15 @@ def get_system_prompt(features: list[str], source: str = "youtube") -> str:
 
     role_line = "You are " + ", ".join(role_parts) + "."
 
-    preamble = f"""{role_line}
+    if source == "web":
+        preamble = f"""{role_line}
+Your job is to turn the extracted main text of a {terms['kind']} into a concise, well-structured knowledge-base note.
+
+You will receive:
+{terms['metadata_line']}
+- The article's main text (images, links and page chrome already removed)"""
+    else:
+        preamble = f"""{role_line}
 Your job is to process a raw {terms['kind']} transcript and return a clean, well-structured result.
 
 You will receive:
@@ -93,11 +111,9 @@ You will receive:
     for i, key_def in enumerate(all_json_keys, 1):
         keys_section += f'\n{i}. "{key_def["key"]}": {key_def["description"]}'
 
-    # Substitute the source noun in rules so "video" → "episode" for podcasts
-    rules_text = "\n\n".join(all_rules)
-    if source == "podcast":
-        rules_text = rules_text.replace("video", terms["noun"])
-        rules_text = rules_text.replace("Video", terms["noun"].capitalize())
+    # Substitute the source noun so "video" → "episode"/"article"
+    rules_text = _adapt_wording("\n\n".join(all_rules), source, terms["noun"])
+    keys_section = _adapt_wording(keys_section, source, terms["noun"])
 
     return f"""{preamble}
 
@@ -106,3 +122,11 @@ You will receive:
 {rules_text}
 
 Return ONLY the JSON object, no other text."""
+
+
+def _adapt_wording(text: str, source: str, noun: str) -> str:
+    if source == "web":
+        text = text.replace("transcript", "article text").replace("watched", "read")
+    if source in ("podcast", "web"):
+        text = text.replace("video", noun).replace("Video", noun.capitalize())
+    return text

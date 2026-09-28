@@ -1,3 +1,4 @@
+import json
 import re
 
 
@@ -54,6 +55,92 @@ def _adapt_metadata(metadata: dict) -> dict:
     return _yt_view(metadata)
 
 
+def _yaml_str(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _yaml_list(key: str, values: list[str]) -> list[str]:
+    values = [v for v in values if v]
+    if not values:
+        return []
+    return [f"{key}:"] + [f"  - {_yaml_str(v)}" for v in values]
+
+
+def _build_web_note(
+    metadata: dict,
+    summary: str,
+    extended_summary: str,
+    focused_summary: str,
+    focus_topic: str,
+    topics: list[str],
+    resources: list[dict],
+    article_info: dict,
+) -> tuple[str, str]:
+    title = metadata["title"]
+    url = metadata["url"]
+    authors = metadata.get("authors", [])
+    tldr = article_info.get("tldr", "").strip()
+    key_points = [p for p in article_info.get("key_points", []) if p]
+    useful_for = [u for u in article_info.get("useful_for", []) if u]
+
+    fm = ["---", f"title: {_yaml_str(title)}", f"source: {_yaml_str(url)}"]
+    fm += _yaml_list("author", authors)
+    fm.append(f"site: {_yaml_str(metadata.get('site', ''))}")
+    if metadata.get("published"):
+        fm.append(f"published: {_yaml_str(metadata['published'])}")
+    fm.append(f"accessed: {_yaml_str(metadata['accessed'])}")
+    if article_info.get("content_type"):
+        fm.append(f"content_type: {_yaml_str(article_info['content_type'])}")
+    if metadata.get("language"):
+        fm.append(f"language: {_yaml_str(metadata['language'])}")
+    fm.append(f"word_count: {metadata.get('word_count', 0)}")
+    fm.append(f"reading_time: {_yaml_str(metadata.get('reading_time', ''))}")
+    if tldr:
+        fm.append(f"description: {_yaml_str(tldr)}")
+    fm += _yaml_list("useful_for", useful_for)
+    fm += _yaml_list("topics", topics)
+    fm += ["tags:", "  - article", "  - summary", "---"]
+
+    header = [f"# {title}", ""]
+    byline = []
+    if authors:
+        byline.append(f"**Author:** {', '.join(authors)}")
+    byline.append(f"**Site:** {metadata.get('site', '')}")
+    header.append("> " + " · ".join(byline) + "  ")
+    dates = []
+    if metadata.get("published"):
+        dates.append(f"**Published:** {metadata['published']}")
+    dates.append(f"**Reading time:** {metadata.get('reading_time', '')}")
+    header.append("> " + " · ".join(dates) + "  ")
+    header.append(f"> **Source:** [{url}]({url})")
+    header.append("")
+    if metadata.get("truncated"):
+        header += ["> [!warning] Very long page — only the first part was summarized.", ""]
+    if tldr:
+        header += ["> [!abstract] TL;DR", f"> {tldr}", ""]
+
+    sections = ["## Summary\n\n" + summary.strip()]
+    if key_points:
+        sections.append("## Key Points\n\n" + "\n".join(f"- {p}" for p in key_points))
+    if useful_for:
+        sections.append("## Useful For\n\n" + "\n".join(f"- {u}" for u in useful_for))
+    if focused_summary.strip():
+        heading = f"## Focus: {focus_topic}" if focus_topic else "## Focus"
+        sections.append(heading + "\n\n" + _demote_headings(focused_summary.strip()))
+    resource_lines = [
+        f"- [[{r['name']}]]" + (f" *({r['type']})*" if r.get("type") else "")
+        for r in resources if r.get("name")
+    ]
+    if resource_lines:
+        sections.append("## Mentioned Resources\n\n" + "\n".join(resource_lines))
+    if extended_summary.strip():
+        sections.append("## Extended Summary\n\n" + _demote_headings(extended_summary.strip()))
+
+    note = "\n".join(fm) + "\n\n" + "\n".join(header) + "\n---\n\n" + "\n\n---\n\n".join(sections) + "\n"
+    filename = (slugify(title)[:100].rstrip("-") or "article") + ".md"
+    return filename, note
+
+
 def build_obsidian_note(
     metadata: dict,
     summary: str,
@@ -65,8 +152,15 @@ def build_obsidian_note(
     topics: list[str] | None = None,
     resources: list[dict] | None = None,
     transcript_source_label: str = "",
+    article_info: dict | None = None,
 ) -> tuple[str, str]:
-    """Returns (filename, markdown_content). Works for YouTube and podcast metadata."""
+    """Returns (filename, markdown_content). Works for YouTube, podcast and web metadata."""
+    if metadata.get("source") == "web":
+        return _build_web_note(
+            metadata, summary, extended_summary, focused_summary, focus_topic,
+            topics or [], resources or [], article_info or {},
+        )
+
     view = _adapt_metadata(metadata)
 
     filename = slugify(view["title"]) + ".md"

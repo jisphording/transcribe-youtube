@@ -109,11 +109,52 @@ tags:
 …
 ```
 
+**Web article note** (any other `http(s)` URL — summarized, never copied verbatim):
+
+```markdown
+---
+title: "Why Spaced Repetition Beats Cramming"
+source: "https://example.com/blog/spaced-repetition"
+author:
+  - "Jane Doe"
+site: "Learning Lab"
+published: "2025-03-14"
+accessed: "2026-09-28"
+content_type: "analysis"
+word_count: 2140
+reading_time: "9 min"
+description: "One-sentence TL;DR — shows up in Dataview / search."
+useful_for:
+  - "designing a study plan"
+topics:
+  - spaced-repetition
+  - memory
+tags:
+  - article
+  - summary
+---
+
+# Why Spaced Repetition Beats Cramming
+
+> **Author:** Jane Doe · **Site:** Learning Lab
+> **Published:** 2025-03-14 · **Reading time:** 9 min
+> **Source:** [https://example.com/blog/spaced-repetition](https://example.com/blog/spaced-repetition)
+
+> [!abstract] TL;DR
+> …
+
+## Summary
+## Key Points
+## Useful For
+## Focus / Mentioned Resources / Extended Summary   ← (optional)
+```
+
 ---
 
 ## Features
 
-- **One modal, two sources** — paste a YouTube URL or an Apple Podcasts URL; the plugin auto-detects which it is and adapts the UI.
+- **One modal, three sources** — paste a YouTube URL, an Apple Podcasts URL or any web article URL; the plugin auto-detects which it is and adapts the UI.
+- **Token-lean article summaries** — only the HTML document is downloaded (no images, scripts, stylesheets or linked pages). [trafilatura](https://trafilatura.readthedocs.io) strips navigation, ads, cookie banners, comments, images and links, so Claude only sees the main text (capped at ~60k chars). Articles are summarized in Claude's own words — there is no verbatim copy of the article in the note. Paywalled, login-walled or JavaScript-only pages are detected and reported instead of producing an empty summary.
 - **Model selection** — Haiku (fastest), Sonnet (balanced), or Opus (highest quality), picked per-import.
 - **Extended summary** — a topic-by-topic editorial rewrite that reads like a standalone piece.
 - **Focus topic** — deep-dive summary on a specific user-supplied topic.
@@ -274,8 +315,8 @@ tail -f /tmp/whisper-server.log /tmp/whisper-server.err  # logs
 - `Cmd+P` → **Import Media (YouTube or Podcast) as Note**
 
 ### In the dialog
-1. Paste a YouTube or Apple Podcasts URL — a small badge shows the detected source
-2. Pick Transcript / Extended Summary / Focus Topic mode
+1. Paste a YouTube, Apple Podcasts or web article URL — a small badge shows the detected source (YouTube / Podcast / Article)
+2. Pick Transcript (shown as **Summary** for articles) / Extended Summary / Focus Topic mode
 3. (Podcast only) Whisper language: `auto` works in most cases; set `en`, `de`, etc. if auto-detect picks the wrong one on short clips
 4. Pick a Claude model
 5. **Import** (or press Enter)
@@ -289,6 +330,7 @@ The new note opens automatically. Videos over ~90 minutes start getting unreliab
 | Backend API URL | `http://localhost:8000` | Where the Python server listens |
 | YouTube notes folder | `YouTube` | Vault folder for new YouTube notes (auto-created) |
 | Podcast notes folder | `Podcasts` | Vault folder for new podcast notes (auto-created) |
+| Article notes folder | `Articles` | Vault folder for new web article summaries (auto-created) |
 | Whisper language | `auto` | Default language hint for whisper.cpp; can be overridden per import |
 | Cookie file | — | Netscape `cookies.txt` upload for when the browser path isn't available (YouTube only) |
 

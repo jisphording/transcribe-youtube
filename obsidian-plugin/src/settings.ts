@@ -10,6 +10,7 @@ export interface YTObsidianSettings {
     apiUrl: string;
     outputFolder: string;          // YouTube notes
     podcastOutputFolder: string;   // Podcast notes
+    webOutputFolder: string;       // Web article notes
     whisperLanguage: string;       // "auto" or ISO 639-1 ("en", "de", …)
     keepWhisperWarm: boolean;      // start whisper-server on plugin load (vs. lazy on first use)
 }
@@ -18,6 +19,7 @@ export const DEFAULT_SETTINGS: YTObsidianSettings = {
     apiUrl: "http://localhost:8000",
     outputFolder: "YouTube",
     podcastOutputFolder: "Podcasts",
+    webOutputFolder: "Articles",
     whisperLanguage: "auto",
     keepWhisperWarm: false,
 };
@@ -137,6 +139,22 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                     refreshCookieStatus();
                 })
         );
+
+        // ── Web articles ─────────────────────────────────────────────────────
+        containerEl.createEl("h3", { text: "Web articles" });
+
+        new Setting(containerEl)
+            .setName("Article notes folder")
+            .setDesc("Vault folder where web article summaries will be saved. Leave empty for vault root.")
+            .addText((text) =>
+                text
+                    .setPlaceholder("Articles")
+                    .setValue(this.plugin.settings.webOutputFolder)
+                    .onChange(async (value) => {
+                        this.plugin.settings.webOutputFolder = value.trim();
+                        await this.plugin.saveSettings();
+                    })
+            );
 
         // ── Podcasts ─────────────────────────────────────────────────────────
         containerEl.createEl("h3", { text: "Podcasts" });

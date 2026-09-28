@@ -1,7 +1,15 @@
-import { Plugin, TFile, normalizePath } from "obsidian";
+import { Plugin, TFile, addIcon, normalizePath } from "obsidian";
 import type { SSEResource, SSESource } from "./sse-handler";
 import { YTObsidianSettings, DEFAULT_SETTINGS, YTObsidianSettingTab } from "./settings";
 import { YouTubeImportModal } from "./import-modal";
+
+// Bundled as SVG so the ribbon icon never depends on Obsidian's Lucide version
+// (a renamed Lucide id renders as an invisible-but-clickable ribbon button).
+const RIBBON_ICON_ID = "media-to-obsidian-import";
+const RIBBON_ICON_SVG =
+    '<g fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M58 10H26a8 8 0 0 0-8 8v64a8 8 0 0 0 8 8h48a8 8 0 0 0 8-8V34z"/>' +
+    '<path d="M58 10v24h24"/><path d="M50 44v30"/><path d="M37 61l13 13 13-13"/></g>';
 
 export default class YTObsidianPlugin extends Plugin {
     settings: YTObsidianSettings;
@@ -11,11 +19,12 @@ export default class YTObsidianPlugin extends Plugin {
 
         this.addCommand({
             id: "import-media",
-            name: "Import Media (YouTube or Podcast) as Note",
+            name: "Import Media (YouTube, Podcast or Web Article) as Note",
             callback: () => new YouTubeImportModal(this.app, this).open(),
         });
 
-        this.addRibbonIcon("file-audio", "Import Media", () => {
+        addIcon(RIBBON_ICON_ID, RIBBON_ICON_SVG);
+        this.addRibbonIcon(RIBBON_ICON_ID, "Import Media", () => {
             new YouTubeImportModal(this.app, this).open();
         });
 
@@ -45,9 +54,9 @@ export default class YTObsidianPlugin extends Plugin {
     }
 
     folderForSource(source: SSESource): string {
-        return source === "podcast"
-            ? this.settings.podcastOutputFolder.trim()
-            : this.settings.outputFolder.trim();
+        if (source === "podcast") return this.settings.podcastOutputFolder.trim();
+        if (source === "web") return this.settings.webOutputFolder.trim();
+        return this.settings.outputFolder.trim();
     }
 
     async createNote(filename: string, content: string, source: SSESource): Promise<TFile> {
