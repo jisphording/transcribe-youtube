@@ -116,4 +116,4 @@ def parse_claude_response(raw_response: str) -> dict:
         cleaned = re.sub(r"^```(?:json)?\n?", "", cleaned)
         cleaned = re.sub(r"\n?```$", "", cleaned)
 
-    return json.loads(cleaned)
+    return json.loads(cleaned, strict=False)
