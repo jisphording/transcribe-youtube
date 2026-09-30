@@ -13,8 +13,17 @@ LOCAL_LLM_MODELS_DIR = os.path.expanduser(os.environ.get("LOCAL_LLM_MODELS_DIR",
 PREFIX = "local:"
 MAX_OUTPUT_TOKENS = 12_000
 DEFAULT_CONTEXT = 32_768
+CHARS_PER_TOKEN_SAFE = 3.0
+CONTEXT_MARGIN_TOKENS = 512
+MIN_INPUT_CHARS = 2_000
+_ctx_cap = os.environ.get("LOCAL_LLM_MAX_CONTEXT", "").strip()
+LOCAL_LLM_MAX_CONTEXT = int(_ctx_cap) if _ctx_cap.isdigit() and int(_ctx_cap) > 0 else None
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+class LocalOutputLimitError(RuntimeError):
+    """The model stopped because it ran out of output tokens — the answer is incomplete."""
 
 
 def is_local(model: str | None) -> bool:
@@ -70,7 +79,10 @@ def list_models() -> dict:
             "id": f"{PREFIX}{m['id']}",
             "name": m["id"],
             "status": "loaded" if m.get("state", "ready") == "ready" else "unloaded",
-            "context_length": meta.get("context_length") or DEFAULT_CONTEXT,
+            "context_length": min(
+                meta.get("context_length") or DEFAULT_CONTEXT,
+                LOCAL_LLM_MAX_CONTEXT or float("inf"),
+            ),
         })
     known = {m["name"] for m in models}
     for name in _disk_models():
@@ -82,6 +94,25 @@ def list_models() -> dict:
                 "context_length": None,
             })
     return {"server": served is not None, "models": models}
+
+
+def context_length(model: str) -> int | None:
+    """Context window of a served local:<id> model, None when the server doesn't list it."""
+    name = model_id(model)
+    for m in list_models()["models"]:
+        if m["name"] == name and m["status"] in ("loaded", "unloaded"):
+            return m["context_length"]
+    return None
+
+
+def input_budget_chars(model: str, system_chars: int, output_ratio: float) -> int:
+    """Input chars that fit next to the system prompt and an answer of output_ratio × input."""
+    ctx = context_length(model) or DEFAULT_CONTEXT
+    system_tokens = system_chars / CHARS_PER_TOKEN_SAFE
+    budget_tokens = (ctx - system_tokens - CONTEXT_MARGIN_TOKENS) / (1 + output_ratio)
+    if output_ratio > 0:
+        budget_tokens = min(budget_tokens, MAX_OUTPUT_TOKENS / output_ratio)
+    return max(MIN_INPUT_CHARS, int(budget_tokens * CHARS_PER_TOKEN_SAFE))
 
 
 def _clean(text: str) -> str:
@@ -111,7 +142,7 @@ def stream_local(
     if prompt_tokens > ctx - 1024:
         raise RuntimeError(
             f"Input (~{prompt_tokens} tokens) exceeds {name}'s context window ({ctx} tokens). "
-            "Use the Transcript mode (it chunks long input) or a Claude model."
+            "Pick a model with a larger context window or use a Claude model."
         )
     max_tokens = int(min(MAX_OUTPUT_TOKENS, ctx - prompt_tokens - 256))
 
@@ -180,7 +211,7 @@ def stream_local(
                     }
 
     if stop_reason == "length":
-        raise RuntimeError(f"{name} hit the output limit ({max_tokens} tokens) — the answer is incomplete.")
+        raise LocalOutputLimitError(f"{name} hit the output limit ({max_tokens} tokens) — the answer is incomplete.")
 
     yield {
         "type": "done",

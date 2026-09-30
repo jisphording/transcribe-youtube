@@ -124,6 +124,304 @@ def _build_chunk_summary_system(extract_resources: bool, source: str) -> str:
     )
 
 
+_LOCAL_CHUNK_SYSTEM = """You are a transcript editor.
+You will receive one segment of a raw transcript. Return a JSON object with these keys:
+1. "heading": Short title (3-6 words) for the segment's topic.
+2. "transcript": The segment with filler words removed ("um", "uh", "like", "you know", "I mean", etc.). Keep the original wording, keep paragraph breaks, add nothing.
+3. "notes": 2-5 terse bullet sentences (one string each, in an array) with the segment's key points.
+{resources_key}{extended_key}{focus_key}
+Return ONLY the JSON object."""
+
+_LOCAL_NOTES_SYSTEM = """You are a note taker.
+You will receive one segment of a raw transcript. Return a JSON object with these keys:
+1. "heading": Short title (3-6 words) for the segment's topic.
+2. "notes": 2-5 terse bullet sentences (one string each, in an array) with the segment's key points.
+{resources_key}{extended_key}{focus_key}
+Return ONLY the JSON object."""
+
+_LOCAL_RESOURCES_KEY = '{n}. "resources": Array of objects with "name" and "type" for every product, software, website, service, tool or platform named in the segment. [] if none.'
+_LOCAL_EXTENDED_KEY = '{n}. "extended": 1-2 sentences explaining the segment\'s theme and key context (for topic-by-topic summary).'
+_LOCAL_FOCUS_KEY = '{n}. "focus_notes": 1-3 terse bullet sentences if the segment relates to the focus topic, otherwise empty array.'
+_LOCAL_OVERHEAD_CHARS = 600
+_LOCAL_SPLIT_DEPTH = 2
+
+
+def _local_chunk_system(notes_only: bool, extract_resources: bool, include_extended: bool = False, include_focus: bool = False) -> str:
+    template = _LOCAL_NOTES_SYSTEM if notes_only else _LOCAL_CHUNK_SYSTEM
+    n = 3 if notes_only else 4
+    resources_str = _LOCAL_RESOURCES_KEY.format(n=n) if extract_resources else ""
+    n += 1 if extract_resources else 0
+    extended_str = _LOCAL_EXTENDED_KEY.format(n=n) if include_extended else ""
+    n += 1 if include_extended else 0
+    focus_str = _LOCAL_FOCUS_KEY.format(n=n) if include_focus else ""
+    return template.format(
+        resources_key="\n" + resources_str if resources_str else "",
+        extended_key="\n" + extended_str if extended_str else "",
+        focus_key="\n" + focus_str if focus_str else "",
+    )
+
+
+_LOCAL_REDUCE_SYSTEM = """You are a note condenser.
+You will receive consecutive segment notes of a {kind}. Merge them into fewer, shorter notes that keep every distinct key point, name and number.
+Return a JSON object with one key: "notes": an array of terse bullet sentences (one string each), about half as many as the input.
+Return ONLY the JSON object."""
+
+_LOCAL_REDUCE_EXTENDED_SYSTEM = """You are a summary editor.
+You will receive consecutive topic-by-topic sections from a {kind}. Merge the thematic context into a shorter editorial narrative (1-2 paragraphs) that keeps every theme and distinct idea.
+Return a JSON object with one key: "extended": the merged narrative.
+Return ONLY the JSON object."""
+
+_LOCAL_REDUCE_FOCUS_SYSTEM = """You are a note condenser (focus mode).
+You will receive consecutive focus-relevant notes from a {kind}. Merge them into fewer, shorter notes that keep every distinct detail about the focus topic.
+Return a JSON object with one key: "notes": an array of terse bullet sentences (one string each), about half as many as the input.
+Return ONLY the JSON object."""
+
+_LOCAL_REDUCE_RATIO = 0.5
+_LOCAL_REDUCE_MAX_ROUNDS = 6
+
+
+def _group_units(units: list[str], group_chars: int) -> list[list[str]]:
+    groups: list[list[str]] = []
+    size = 0
+    for unit in units:
+        if groups and size + len(unit) + 2 <= group_chars:
+            groups[-1].append(unit)
+            size += len(unit) + 2
+        else:
+            groups.append([unit])
+            size = len(unit)
+    return groups
+
+
+def _local_reduce_notes(
+    model: str, source: str, title: str, units: list[str], final_chars: int,
+    stats: dict, stage_label: str, total_steps: int,
+):
+    """Condense segment notes until they fit final_chars. Yields SSE events, returns the joined notes."""
+    kind = "podcast episode" if source == "podcast" else "YouTube video"
+    system = _LOCAL_REDUCE_SYSTEM.format(kind=kind)
+    group_chars = local_llm.input_budget_chars(model, len(system) + _LOCAL_OVERHEAD_CHARS, _LOCAL_REDUCE_RATIO)
+    for round_no in range(1, _LOCAL_REDUCE_MAX_ROUNDS + 1):
+        joined = "\n\n".join(units)
+        if len(joined) <= final_chars:
+            return joined
+        pieces = [p for u in units for p in _split_transcript(u, group_chars)]
+        groups = _group_units(pieces, group_chars)
+        yield _sse_event(
+            stage_label,
+            f"Step 3/{total_steps} — Condensing notes — round {round_no}, {len(groups)} groups…",
+            step=3, total_steps=total_steps,
+        )
+        reduced: list[str] = []
+        for i, group in enumerate(groups):
+            user = (
+                f"{_title_label(source)}: {title} (notes group {i + 1}/{len(groups)})\n\n"
+                "--- NOTES ---\n" + "\n\n".join(group) + "\n--- END NOTES ---"
+            )
+            raw = None
+            try:
+                for update in local_llm.stream_local(model, system, user):
+                    if update["type"] == "done":
+                        raw = update["response"]
+                        stats["in"] += update["input_tokens"]
+                        stats["out"] += update["output_tokens"]
+                notes = parse_claude_response(raw or "").get("notes", [])
+            except Exception as e:
+                raise RuntimeError(f"note condensing (round {round_no}, group {i + 1}): {e}")
+            if isinstance(notes, str):
+                notes = [notes]
+            lines = [str(n).strip() for n in notes if str(n).strip()]
+            if not lines:
+                raise RuntimeError(f"note condensing (round {round_no}, group {i + 1}): empty result")
+            reduced.append(f"## Part {i + 1}\n" + "\n".join(f"- {n}" for n in lines))
+        if sum(map(len, reduced)) >= len(joined):
+            raise RuntimeError(f"note condensing (round {round_no}): output did not shrink")
+        units = reduced
+    joined = "\n\n".join(units)
+    if len(joined) > final_chars:
+        raise RuntimeError(f"notes still too long after {_LOCAL_REDUCE_MAX_ROUNDS} condensing rounds")
+    return joined
+
+
+def _local_reduce_extended(
+    model: str, source: str, title: str, units: list[str], final_chars: int,
+    stats: dict, stage_label: str, total_steps: int,
+):
+    """Condense extended sections until they fit final_chars. Yields SSE events, returns the merged text."""
+    kind = "podcast episode" if source == "podcast" else "YouTube video"
+    system = _LOCAL_REDUCE_EXTENDED_SYSTEM.format(kind=kind)
+    group_chars = local_llm.input_budget_chars(model, len(system) + _LOCAL_OVERHEAD_CHARS, _LOCAL_REDUCE_RATIO)
+    for round_no in range(1, _LOCAL_REDUCE_MAX_ROUNDS + 1):
+        joined = "\n\n".join(units)
+        if len(joined) <= final_chars:
+            return joined
+        pieces = [p for u in units for p in _split_transcript(u, group_chars)]
+        groups = _group_units(pieces, group_chars)
+        yield _sse_event(
+            stage_label,
+            f"Step 3/{total_steps} — Condensing extended sections — round {round_no}, {len(groups)} groups…",
+            step=3, total_steps=total_steps,
+        )
+        reduced: list[str] = []
+        for i, group in enumerate(groups):
+            user = (
+                f"{_title_label(source)}: {title} (extended group {i + 1}/{len(groups)})\n\n"
+                "--- SECTIONS ---\n" + "\n\n".join(group) + "\n--- END SECTIONS ---"
+            )
+            raw = None
+            try:
+                for update in local_llm.stream_local(model, system, user):
+                    if update["type"] == "done":
+                        raw = update["response"]
+                        stats["in"] += update["input_tokens"]
+                        stats["out"] += update["output_tokens"]
+                extended = parse_claude_response(raw or "").get("extended", "")
+            except Exception as e:
+                raise RuntimeError(f"extended condensing (round {round_no}, group {i + 1}): {e}")
+            if not str(extended).strip():
+                raise RuntimeError(f"extended condensing (round {round_no}, group {i + 1}): empty result")
+            reduced.append(str(extended).strip())
+        if sum(map(len, reduced)) >= len(joined):
+            raise RuntimeError(f"extended condensing (round {round_no}): output did not shrink")
+        units = reduced
+    joined = "\n\n".join(units)
+    if len(joined) > final_chars:
+        raise RuntimeError(f"extended still too long after {_LOCAL_REDUCE_MAX_ROUNDS} condensing rounds")
+    return joined
+
+
+def _local_reduce_focus_notes(
+    model: str, source: str, title: str, units: list[str], final_chars: int,
+    stats: dict, stage_label: str, total_steps: int,
+):
+    """Condense focus notes until they fit final_chars. Yields SSE events, returns the merged notes."""
+    kind = "podcast episode" if source == "podcast" else "YouTube video"
+    system = _LOCAL_REDUCE_FOCUS_SYSTEM.format(kind=kind)
+    group_chars = local_llm.input_budget_chars(model, len(system) + _LOCAL_OVERHEAD_CHARS, _LOCAL_REDUCE_RATIO)
+    for round_no in range(1, _LOCAL_REDUCE_MAX_ROUNDS + 1):
+        joined = "\n\n".join(units)
+        if len(joined) <= final_chars:
+            return joined
+        pieces = [p for u in units for p in _split_transcript(u, group_chars)]
+        groups = _group_units(pieces, group_chars)
+        yield _sse_event(
+            stage_label,
+            f"Step 3/{total_steps} — Condensing focus notes — round {round_no}, {len(groups)} groups…",
+            step=3, total_steps=total_steps,
+        )
+        reduced: list[str] = []
+        for i, group in enumerate(groups):
+            user = (
+                f"{_title_label(source)}: {title} (focus notes group {i + 1}/{len(groups)})\n\n"
+                "--- NOTES ---\n" + "\n\n".join(group) + "\n--- END NOTES ---"
+            )
+            raw = None
+            try:
+                for update in local_llm.stream_local(model, system, user):
+                    if update["type"] == "done":
+                        raw = update["response"]
+                        stats["in"] += update["input_tokens"]
+                        stats["out"] += update["output_tokens"]
+                notes = parse_claude_response(raw or "").get("notes", [])
+            except Exception as e:
+                raise RuntimeError(f"focus condensing (round {round_no}, group {i + 1}): {e}")
+            if isinstance(notes, str):
+                notes = [notes]
+            lines = [str(n).strip() for n in notes if str(n).strip()]
+            if not lines:
+                raise RuntimeError(f"focus condensing (round {round_no}, group {i + 1}): empty result")
+            reduced.append(f"## Part {i + 1}\n" + "\n".join(f"- {n}" for n in lines))
+        if sum(map(len, reduced)) >= len(joined):
+            raise RuntimeError(f"focus condensing (round {round_no}): output did not shrink")
+        units = reduced
+    joined = "\n\n".join(units)
+    if len(joined) > final_chars:
+        raise RuntimeError(f"focus notes still too long after {_LOCAL_REDUCE_MAX_ROUNDS} condensing rounds")
+    return joined
+
+
+def _chunk_plan(
+    model: str, source: str, use_extended_model: bool, transcript_chars: int,
+    system_chars: int, chunk_system_chars: int, notes_only: bool,
+) -> tuple[bool, int]:
+    """Decide whether to chunk and how many transcript chars go into one chunk."""
+    if source == "web":
+        return False, 0
+    if use_extended_model and not local_llm.is_local(model):
+        return False, 0
+    if not local_llm.is_local(model):
+        return model == HAIKU and transcript_chars > _CHUNK_THRESHOLD_CHARS, _CHUNK_CHARS
+    ctx = local_llm.context_length(model) or local_llm.DEFAULT_CONTEXT
+    per_token = local_llm.CHARS_PER_TOKEN_SAFE
+    # single-shot always returns the full transcript, so expected output ≈ input
+    in_tokens = (system_chars + transcript_chars + _LOCAL_OVERHEAD_CHARS) / per_token
+    out_tokens = transcript_chars / per_token + 500
+    if in_tokens + out_tokens <= ctx - local_llm.CONTEXT_MARGIN_TOKENS and out_tokens <= local_llm.MAX_OUTPUT_TOKENS:
+        return False, 0
+    return True, local_llm.input_budget_chars(
+        model, chunk_system_chars + _LOCAL_OVERHEAD_CHARS, 0.15 if notes_only else 1.0,
+    )
+
+
+def _local_chunk(
+    model: str, system: str, source: str, title: str, label: str, chunk: str,
+    depth: int, stats: dict, stage_label: str, total_steps: int, focus_topic: str = "",
+):
+    """Process one chunk on a local model; splits it in two when the answer hits the output limit.
+
+    Yields SSE events and returns a list of section dicts (heading, transcript, notes, resources, extended, focus_notes).
+    """
+    user = (
+        f"{_title_label(source)}: {title} (segment {label})\n\n"
+        f"--- TRANSCRIPT SEGMENT ---\n{chunk}\n--- END SEGMENT ---"
+    )
+    if focus_topic:
+        user += f"\nFocus topic: {focus_topic}"
+    raw = None
+    try:
+        for update in local_llm.stream_local(model, system, user):
+            if update["type"] == "done":
+                raw = update["response"]
+                stats["in"] += update["input_tokens"]
+                stats["out"] += update["output_tokens"]
+    except local_llm.LocalOutputLimitError:
+        if depth >= _LOCAL_SPLIT_DEPTH:
+            raise RuntimeError(f"chunk {label} is still too dense after splitting it twice")
+        halves = _split_transcript(chunk, len(chunk) // 2 + 1)
+        yield _sse_event(
+            stage_label,
+            f"Step 3/{total_steps} — Chunk {label} too dense — split in {'two' if len(halves) == 2 else len(halves)}…",
+            step=3, total_steps=total_steps,
+        )
+        sections: list[dict] = []
+        for j, half in enumerate(halves):
+            sections += yield from _local_chunk(
+                model, system, source, title, f"{label}{chr(97 + j)}", half,
+                depth + 1, stats, stage_label, total_steps, focus_topic,
+            )
+        return sections
+    if raw is None:
+        raise RuntimeError(f"no response for chunk {label}")
+    try:
+        result = parse_claude_response(raw)
+    except Exception as e:
+        raise RuntimeError(f"invalid JSON on chunk {label}: {e}")
+    notes = result.get("notes", [])
+    if isinstance(notes, str):
+        notes = [notes]
+    focus_notes = result.get("focus_notes", [])
+    if isinstance(focus_notes, str):
+        focus_notes = [focus_notes]
+    return [{
+        "heading": result.get("heading") or f"Part {label}",
+        "transcript": result.get("transcript", ""),
+        "notes": [str(n).strip() for n in notes if str(n).strip()],
+        "extended": result.get("extended", ""),
+        "focus_notes": [str(n).strip() for n in focus_notes if str(n).strip()],
+        "resources": result.get("resources", []) or [],
+    }]
+
+
 def _split_transcript(text: str, chunk_size: int) -> list[str]:
     if len(text) <= chunk_size:
         return [text]
@@ -501,19 +799,31 @@ def _run_claude_and_note(
     else:
         stage_label = "claude"
 
-    use_chunks = (
-        source != "web"
-        and not use_extended_model
-        and (model == HAIKU or local_llm.is_local(model))
-        and transcript_chars > _CHUNK_THRESHOLD_CHARS
+    is_local = local_llm.is_local(model)
+    notes_only = is_local and not request.include_transcript
+    include_extended_in_chunks = is_local and (request.extended_summary or request.focus_include_extended)
+    include_focus_in_chunks = is_local and bool(request.focus_topic)
+    local_system = _local_chunk_system(
+        notes_only, request.extract_resources, include_extended_in_chunks, include_focus_in_chunks
+    )
+    use_chunks, chunk_chars = _chunk_plan(
+        model, source, use_extended_model, transcript_chars,
+        len(get_system_prompt(features, source=source)) if is_local else 0,
+        len(local_system), notes_only,
     )
 
     if use_chunks:
-        chunks = _split_transcript(raw_text, _CHUNK_CHARS)
+        chunks = _split_transcript(raw_text, chunk_chars)
         n_chunks = len(chunks)
+        if is_local:
+            ctx = local_llm.context_length(model) or local_llm.DEFAULT_CONTEXT
+            size_label = f"{_llm_label(model)} ({ctx // 1024}k context)"
+            mode_label = " (notes only)" if notes_only else ""
+        else:
+            size_label, mode_label = _llm_label(model), ""
         yield _sse_event(
             stage_label,
-            f"Step 3/{total_steps} — Transcript split into {n_chunks} chunks for {_llm_label(model)}…",
+            f"Step 3/{total_steps} — Transcript split into {n_chunks} chunks for {size_label}{mode_label}…",
             step=3, total_steps=total_steps,
         )
 
@@ -522,12 +832,25 @@ def _run_claude_and_note(
         total_out_tokens = 0
         chunk_start_time = time.time()
 
+        local_sections: list[dict] = []
+        local_stats = {"in": 0, "out": 0}
+
         for i, chunk in enumerate(chunks):
             yield _sse_event(
                 stage_label,
-                f"Step 3/{total_steps} — Cleaning chunk {i + 1}/{n_chunks}…",
+                f"Step 3/{total_steps} — {'Processing' if is_local else 'Cleaning'} chunk {i + 1}/{n_chunks}…",
                 step=3, total_steps=total_steps,
             )
+            if is_local:
+                try:
+                    local_sections += yield from _local_chunk(
+                        model, local_system, source, metadata["title"], str(i + 1), chunk,
+                        0, local_stats, stage_label, total_steps, request.focus_topic or "",
+                    )
+                except Exception as e:
+                    yield _sse_event("error", f"{_llm_label(model)} error on {e}")
+                    return
+                continue
             chunk_user = (
                 f"{_title_label(source)}: {metadata['title']} (segment {i + 1}/{n_chunks})\n\n"
                 f"--- TRANSCRIPT SEGMENT ---\n{chunk}\n--- END SEGMENT ---"
@@ -563,15 +886,36 @@ def _run_claude_and_note(
             f"Step 3/{total_steps} — Generating summary…",
             step=3, total_steps=total_steps,
         )
-        combined_cleaned = "\n\n".join(cleaned_sections)
         source_name_label = "Channel" if source == "youtube" else "Show"
         source_name = metadata.get("channel") if source == "youtube" else metadata.get("show", "")
+        if is_local:
+            total_in_tokens += local_stats["in"]
+            total_out_tokens += local_stats["out"]
+            combined_cleaned = "\n\n".join(
+                f"## {s['heading']}\n\n{s['transcript']}" for s in local_sections
+            ) if not notes_only else ""
+            chunk_summary_system = _build_chunk_summary_system(False, source)
+            units = [
+                f"## {s['heading']}\n" + "\n".join(f"- {n}" for n in s["notes"]) for s in local_sections
+            ]
+            budget = local_llm.input_budget_chars(model, len(chunk_summary_system) + _LOCAL_OVERHEAD_CHARS, 0.15)
+            try:
+                notes_text = yield from _local_reduce_notes(
+                    model, source, metadata["title"], units, budget, local_stats, stage_label, total_steps,
+                )
+            except Exception as e:
+                yield _sse_event("error", f"{_llm_label(model)} error on {e}")
+                return
+            total_in_tokens, total_out_tokens = local_stats["in"], local_stats["out"]
+            summary_body = f"Notes by section:\n{notes_text}"
+        else:
+            combined_cleaned = "\n\n".join(cleaned_sections)
+            chunk_summary_system = _build_chunk_summary_system(request.extract_resources, source)
+            summary_body = f"Transcript:\n{combined_cleaned[:40_000]}"
         summary_user = (
-            f"Title: {metadata['title']}\n{source_name_label}: {source_name}\n\n"
-            f"Transcript:\n{combined_cleaned[:40_000]}"
+            f"Title: {metadata['title']}\n{source_name_label}: {source_name}\n\n{summary_body}"
         )
         summary_raw = None
-        chunk_summary_system = _build_chunk_summary_system(request.extract_resources, source)
         try:
             for update in _stream_llm(model, chunk_summary_system, summary_user, effort):
                 if update["type"] == "done":
@@ -602,10 +946,55 @@ def _run_claude_and_note(
 
         summary = summary_result.get("summary", "")
         topics = summary_result.get("topics", [])
-        resources = summary_result.get("resources", []) if request.extract_resources else []
+        if is_local:
+            seen: set[str] = set()
+            resources = []
+            for sec in local_sections:
+                for r in sec["resources"] if request.extract_resources else []:
+                    name = r.get("name", "").strip() if isinstance(r, dict) else ""
+                    if name and name.lower() not in seen:
+                        seen.add(name.lower())
+                        resources.append(r)
+            extended_summary = ""
+            focused_summary = ""
+            if include_extended_in_chunks:
+                extended_units = [
+                    f"## {s['heading']}\n\n{s['extended']}" for s in local_sections if s.get("extended", "").strip()
+                ]
+                if extended_units:
+                    budget = local_llm.input_budget_chars(model, len(_LOCAL_REDUCE_EXTENDED_SYSTEM) + _LOCAL_OVERHEAD_CHARS, 0.15)
+                    try:
+                        before_in, before_out = local_stats["in"], local_stats["out"]
+                        extended_summary = yield from _local_reduce_extended(
+                            model, source, metadata["title"], extended_units, budget, local_stats, stage_label, total_steps,
+                        )
+                        total_in_tokens += local_stats["in"] - before_in
+                        total_out_tokens += local_stats["out"] - before_out
+                    except Exception as e:
+                        yield _sse_event("error", f"{_llm_label(model)} error on extended: {e}")
+                        return
+            if include_focus_in_chunks:
+                focus_units = [
+                    f"## {s['heading']}\n" + "\n".join(f"- {n}" for n in s.get("focus_notes", []))
+                    for s in local_sections if s.get("focus_notes", [])
+                ]
+                if focus_units:
+                    budget = local_llm.input_budget_chars(model, len(_LOCAL_REDUCE_FOCUS_SYSTEM) + _LOCAL_OVERHEAD_CHARS, 0.15)
+                    try:
+                        before_in, before_out = local_stats["in"], local_stats["out"]
+                        focused_summary = yield from _local_reduce_focus_notes(
+                            model, source, metadata["title"], focus_units, budget, local_stats, stage_label, total_steps,
+                        )
+                        total_in_tokens += local_stats["in"] - before_in
+                        total_out_tokens += local_stats["out"] - before_out
+                    except Exception as e:
+                        yield _sse_event("error", f"{_llm_label(model)} error on focus: {e}")
+                        return
+        else:
+            resources = summary_result.get("resources", []) if request.extract_resources else []
+            extended_summary = ""
+            focused_summary = ""
         transcript_md = combined_cleaned
-        extended_summary = ""
-        focused_summary = ""
         article_info = None
 
     else:
