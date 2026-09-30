@@ -26,6 +26,9 @@ export interface BatchPreview {
     items: PreviewItem[];
     estimate: BatchEstimate;
     has_more: boolean;
+    skipped_duplicates: number;
+    searched: number;
+    window_exhausted: boolean;
     capped: boolean;
     count_requested: number | null;
     expires_in_seconds: number;

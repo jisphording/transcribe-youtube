@@ -45,7 +45,7 @@ export class BatchPanel {
         this.minInput.value = "15";
         this.minInput.style.width = "56px";
         row.createSpan({ text: "min long" });
-        const hint = this.wrapper.createDiv({ text: "Leave the count empty to import all (up to 20). Items already in your vault are skipped." });
+        const hint = this.wrapper.createDiv({ text: "Leave the count empty to import up to 20 new items. Items already in your vault are skipped." });
         hint.style.fontSize = "12px";
         hint.style.color = "var(--text-muted)";
         hint.style.marginTop = "4px";
@@ -131,8 +131,9 @@ export class BatchPanel {
 
     private renderPreview(p: BatchPreview) {
         this.previewEl.empty();
-        const fresh = p.items.filter((i) => !i.duplicate);
-        const dupes = p.items.length - fresh.length;
+        const fresh = p.items;
+        const dupes = p.skipped_duplicates;
+        const noun = p.source === "podcast" ? "episodes" : "videos";
 
         const summary = this.previewEl.createDiv();
         summary.style.fontSize = "13px";
@@ -142,7 +143,9 @@ export class BatchPanel {
             (fresh.length ? ` · estimated ${fmtUsd(p.estimate.low)}–${fmtUsd(p.estimate.high)} (${p.estimate.model})` : "")
         );
         const notes: string[] = [];
-        if (p.has_more && p.count_requested == null) notes.push("More than 20 items — showing the latest 20. Enter a count to import more.");
+        if (p.has_more && p.count_requested == null) notes.push("More than 20 new items — showing the latest 20. Enter a count to import more.");
+        if (dupes && fresh.length) notes.push(`${dupes} ${noun} already in your vault were skipped — the next new ones are listed instead.`);
+        if (p.window_exhausted) notes.push(`Only the latest ${p.searched} ${noun} were checked; older ones were not searched.`);
         if (p.capped) notes.push("Apple lists at most 200 episodes per show — capped at 200.");
         if (p.items.some((i) => i.duration_estimated)) notes.push("~ = the feed has no duration; estimated from the show's other episodes.");
         if (p.source === "youtube" && fresh.length > 1) notes.push("YouTube items run with 15–45 s pauses (max. 60 per hour) to avoid bot checks.");
@@ -164,14 +167,13 @@ export class BatchPanel {
             row.style.gap = "8px";
             row.style.padding = "3px 8px";
             row.style.fontSize = "12px";
-            if (item.duplicate) row.style.opacity = "0.5";
             const title = row.createSpan({ text: item.title });
             title.style.flex = "1";
             title.style.overflow = "hidden";
             title.style.textOverflow = "ellipsis";
             title.style.whiteSpace = "nowrap";
             row.createSpan({ text: (item.duration_estimated ? "~" : "") + fmtDuration(item.duration_seconds) });
-            row.createSpan({ text: item.duplicate ? "in vault" : fmtUsd(item.cost_estimate) });
+            row.createSpan({ text: fmtUsd(item.cost_estimate) });
         }
 
         if (p.batch_id) {
@@ -181,7 +183,12 @@ export class BatchPanel {
             this.startBtn.style.display = "";
             this.host.setStatus("Check the list and the estimated cost, then start the import.", "info");
         } else {
-            this.host.setStatus(p.items.length ? "✓ Everything is already in your vault." : "No items match these filters.", "warning");
+            this.host.setStatus(
+                dupes
+                    ? `✓ Nothing to import — all ${dupes} ${noun} checked${p.window_exhausted ? " (the latest ones)" : ""} are already in your vault.`
+                    : "No items match these filters.",
+                "warning"
+            );
         }
     }
 
@@ -195,7 +202,7 @@ export class BatchPanel {
         this.host.setBusy(true);
         try {
             await confirmBatch(this.plugin.settings.apiUrl, this.preview.batch_id);
-            new Notice(`Queued ${this.preview.items.filter((i) => !i.duplicate).length} items from ${this.preview.title}`);
+            new Notice(`Queued ${this.preview.items.length} items from ${this.preview.title}`);
             await this.plugin.activateQueueView();
             this.host.close();
         } catch (e) {

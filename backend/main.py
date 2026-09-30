@@ -800,8 +800,10 @@ async def batch_create(req: BatchRequest):
         raise HTTPException(400, str(e))
 
     limit = min(req.count or BATCH_ALL_LIMIT, BATCH_MAX_COUNT)
+    # List the whole window, not just `limit` items: items already in the vault are skipped
+    # and the next new ones take their place.
     try:
-        listing = await asyncio.to_thread(lister, req.url, limit, max(req.min_minutes, 0) * 60)
+        listing = await asyncio.to_thread(lister, req.url, BATCH_MAX_COUNT, max(req.min_minutes, 0) * 60)
     except YouTubeBlockedError as e:
         raise HTTPException(429, f"YouTube blocked the request: {e}")
     except Exception as e:
@@ -809,7 +811,7 @@ async def batch_create(req: BatchRequest):
 
     known = set(req.known_ids) | await asyncio.to_thread(vault.scan_ids, req.scan_roots)
     model, _ = _batch_model(req.options)
-    items, new_items = [], []
+    new_items, skipped_duplicates = [], 0
     for it in listing["items"]:
         external_id = it["video_id"] if source == "youtube" else it["apple_episode_id"]
         guid = it.get("episode_guid")
@@ -820,12 +822,15 @@ async def batch_create(req: BatchRequest):
             "title": it["title"],
             "duration_seconds": it["duration_seconds"],
             "duration_estimated": it.get("duration_estimated", False),
-            "duplicate": external_id in known or (guid in known if guid else False),
+            "duplicate": False,
             "cost_estimate": round(_estimate_item_cost(it["duration_seconds"], req.options), 4),
         }
-        items.append(item)
-        if not item["duplicate"]:
+        if external_id in known or (guid in known if guid else False):
+            skipped_duplicates += 1
+        else:
             new_items.append(item)
+    has_more = len(new_items) > limit
+    new_items = new_items[:limit]
 
     total = sum(i["cost_estimate"] for i in new_items)
     estimate = {
@@ -845,9 +850,12 @@ async def batch_create(req: BatchRequest):
         "batch_id": batch_id,
         "source": source,
         "title": listing["title"],
-        "items": items,
+        "items": new_items,
         "estimate": estimate,
-        "has_more": listing["has_more"],
+        "has_more": has_more,
+        "skipped_duplicates": skipped_duplicates,
+        "searched": len(listing["items"]),
+        "window_exhausted": listing["has_more"] and len(new_items) < limit,
         "capped": listing.get("capped", False) or (req.count or 0) > BATCH_MAX_COUNT,
         "count_requested": req.count,
         "expires_in_seconds": batch_queue.CONFIRM_TIMEOUT_SECONDS,
