@@ -19,6 +19,9 @@ export class YouTubeImportModal extends Modal {
     focusTopicInput: HTMLTextAreaElement;
     focusIncludeExtendedCheckbox: HTMLInputElement;
     modelSelect: HTMLSelectElement;
+    localModelWrapper: HTMLElement;
+    localModelSelect: HTMLSelectElement;
+    localRefreshBtn: HTMLButtonElement;
     extractResourcesCheckbox: HTMLInputElement;
     podcastOptionsWrapper: HTMLElement;
     whisperLanguageInput: HTMLInputElement;
@@ -183,6 +186,7 @@ export class YouTubeImportModal extends Modal {
         modelWrapper.style.display = "flex";
         modelWrapper.style.alignItems = "center";
         modelWrapper.style.gap = "8px";
+        modelWrapper.style.flexWrap = "wrap";
 
         modelWrapper.createEl("label", { text: "Model:" }).style.fontSize = "14px";
 
@@ -193,6 +197,26 @@ export class YouTubeImportModal extends Modal {
         this.modelSelect.createEl("option", { text: "Sonnet (balanced)", value: MODEL_SONNET });
         this.modelSelect.createEl("option", { text: "Opus (highest quality)", value: MODEL_OPUS });
         this.modelSelect.value = MODEL_HAIKU;
+
+        // Local models (OpenAI-compatible server behind the backend) — shown only when available
+        this.localModelWrapper = modelWrapper.createDiv();
+        this.localModelWrapper.style.display = "none";
+        this.localModelWrapper.style.alignItems = "center";
+        this.localModelWrapper.style.gap = "8px";
+        this.localModelWrapper.style.marginLeft = "8px";
+        this.localModelWrapper.createEl("label", { text: "Local:" }).style.fontSize = "14px";
+        this.localModelSelect = this.localModelWrapper.createEl("select", { cls: "dropdown" });
+        this.localModelSelect.addEventListener("change", () => {
+            this.modelSelect.disabled = !!this.localModelSelect.value;
+            this.plugin.settings.localModel = this.localModelSelect.value;
+            this.plugin.saveSettings();
+        });
+        this.localRefreshBtn = this.localModelWrapper.createEl("button", {
+            text: "↻",
+            attr: { "aria-label": "Refresh local models (after switching the model in MLX Core)" },
+        });
+        this.localRefreshBtn.addEventListener("click", () => this.loadLocalModels());
+        this.loadLocalModels();
 
         // Extract resources toggle
         const resourcesWrapper = contentEl.createDiv({ cls: "yt-obsidian-resources-wrapper" });
@@ -517,6 +541,35 @@ export class YouTubeImportModal extends Modal {
         }
     }
 
+    async loadLocalModels() {
+        type LocalModel = { id: string; name: string; status: "loaded" | "unloaded" | "switch" | "offline" };
+        const suffix: Record<LocalModel["status"], string> = {
+            loaded: " (loaded)",
+            unloaded: " (not loaded — may not fit in RAM)",
+            switch: " (switch in MLX Core first)",
+            offline: " (MLX server not running)",
+        };
+        let models: LocalModel[] = [];
+        try {
+            const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
+            const resp = await fetch(`${apiUrl}/local-models`);
+            if (resp.ok) models = (await resp.json()).models ?? [];
+        } catch {
+            // Backend not running — keep the dropdown hidden
+        }
+        const wanted = this.localModelSelect.value || this.plugin.settings.localModel;
+        this.localModelSelect.empty();
+        this.localModelSelect.createEl("option", { text: "— off (use Claude) —", value: "" });
+        for (const m of models) {
+            const opt = this.localModelSelect.createEl("option", { text: m.name + suffix[m.status], value: m.id });
+            opt.disabled = m.status === "switch" || m.status === "offline";
+        }
+        const usable = models.some((m) => m.id === wanted && (m.status === "loaded" || m.status === "unloaded"));
+        this.localModelSelect.value = usable ? wanted : "";
+        this.modelSelect.disabled = !!this.localModelSelect.value;
+        this.localModelWrapper.style.display = models.length ? "flex" : "none";
+    }
+
     /** Output options shared by single imports and batches (a batch snapshots them). */
     collectOptions(source: MediaSource | CollectionSource): BatchOptions {
         const opts: BatchOptions = {};
@@ -537,6 +590,11 @@ export class YouTubeImportModal extends Modal {
         } else {
             opts.model = this.modelSelect.value;
         }
+        const local = this.localModelSelect.value;
+        if (local) {
+            if (opts.extended_model) opts.extended_model = local;
+            else opts.model = local;
+        }
         if (this.extractResourcesCheckbox.checked) {
             opts.extract_resources = true;
         }
@@ -547,7 +605,9 @@ export class YouTubeImportModal extends Modal {
         this.importBtn.disabled = disabled;
         this.urlInput.disabled = disabled;
         this.modeToggleBtns.forEach((b) => (b.disabled = disabled));
-        this.modelSelect.disabled = disabled;
+        this.modelSelect.disabled = disabled || !!this.localModelSelect.value;
+        this.localModelSelect.disabled = disabled;
+        this.localRefreshBtn.disabled = disabled;
         this.extractResourcesCheckbox.disabled = disabled;
         this.focusTopicInput.disabled = disabled;
         this.focusIncludeExtendedCheckbox.disabled = disabled;

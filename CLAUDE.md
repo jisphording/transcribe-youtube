@@ -32,6 +32,7 @@ Each file has a single responsibility. Do not merge concerns across modules.
 | `whisper.py` | Local whisper-server HTTP client. Downloads audio → POSTs to `whisper-server` → returns transcript | — |
 | `web.py` | Web article fetch (HTML only — no images/scripts/linked pages), accessibility checks, main-text + metadata extraction via `trafilatura`, URL cleaning | — |
 | `claude.py` | Claude API streaming, response parsing, model constants | — |
+| `local_llm.py` | Optional local LLM via an OpenAI-compatible server (`LOCAL_LLM_URL`, default MLX Core on `:11234`): `list_models()` (served models + installed ones under `LOCAL_LLM_MODELS_DIR`, each with a `status`), `stream_local()` with the same yield contract as `stream_claude()`. Model ids are prefixed `local:` | — |
 | `note.py` | Source-agnostic Obsidian markdown note assembly (YouTube + podcast variants, separate web article layout) | — |
 | `cookies.py` | Cookie file persistence (save/delete/check) | — |
 | `vault.py` | Batch queue writes into the vault: path validation, atomic note write + collision suffix, resource stubs, frontmatter id scan | — |
@@ -45,7 +46,7 @@ Each file has a single responsibility. Do not merge concerns across modules.
 | `prompts/resources.py` | Resources prompt: extract products/tools/services as wiki-link stubs | — |
 
 **Rules:**
-- `youtube.py`, `podcast.py`, `whisper.py`, `web.py`, `claude.py`, `note.py`, `cookies.py`, `vault.py` and `batch_queue.py` must NOT import from each other. They are independent modules orchestrated only by `main.py`.
+- `youtube.py`, `podcast.py`, `whisper.py`, `web.py`, `claude.py`, `local_llm.py`, `note.py`, `cookies.py`, `vault.py` and `batch_queue.py` must NOT import from each other. They are independent modules orchestrated only by `main.py`.
 - `models.py` contains only Pydantic models — no logic.
 - Prompt modules expose only `ROLE_PREAMBLE`, `JSON_KEYS`, and `RULES` — no functions.
 - The prompt composer (`prompts.get_system_prompt`) takes a `source` argument (`"youtube"`, `"podcast"` or `"web"`) so the same feature flags work for all sources — the wording adapts. For `"web"` it swaps `base` for `article`.
@@ -83,6 +84,7 @@ Frontend ↔ Backend communicate via:
 - `POST /batch` — list + filter + dedup + estimate a channel / playlist / show; creates a `pending_confirmation` batch (expires after 30 min)
 - `POST /batch/{id}/confirm` · `/cancel` · `/retry` (failed items) · `POST /batch/lanes/{lane}/resume` (lift a block early)
 - `GET /batch` (recent batches + item states + lane status) · `GET /batch/{id}`
+- `GET /local-models` — `{server, models}`; each model has `status` `loaded` / `unloaded` / `switch` (installed in another folder — pick it in the MLX Core menu) / `offline`. The modal shows the "Local" dropdown (with ↻ refresh) only when the list is non-empty; `switch` / `offline` entries are disabled
 - `GET /health` — Health check
 
 ## URL detection
@@ -218,7 +220,7 @@ The `deploy` script reads `OBSIDIAN_PLUGINS_PATH` from `obsidian-plugin/.env` an
 
 Both `.env` files are gitignored. Copy the `.env.example` templates on first setup.
 
-- `backend/.env`: `ANTHROPIC_API_KEY` — required for Claude API. The LaunchAgent must be restarted (`stop.sh` + `start.sh`) after changes.
+- `backend/.env`: `ANTHROPIC_API_KEY` — required for Claude API. `LOCAL_LLM_URL` — optional, OpenAI-compatible local server (default `http://127.0.0.1:11234`). `LOCAL_LLM_MODELS_DIR` — installed models (`<org>/<model>`, default `~/.mlx-serve/models`). The LaunchAgent must be restarted (`stop.sh` + `start.sh`) after changes.
 - `obsidian-plugin/.env`: `OBSIDIAN_PLUGINS_PATH` — primary vault deploy target. Additional vaults can be added as `OBSIDIAN_PLUGINS_PATH_2`, `_3`, etc. — `deploy.sh` picks up all matching variables automatically.
 
 ## SSE Event Protocol
@@ -261,4 +263,5 @@ Podcasts don't need cookies — RSS feeds are public.
 - The ribbon icon is a bundled SVG registered with `addIcon()` — don't switch it back to a Lucide id; renamed Lucide ids render as an invisible (but clickable) ribbon button.
 - Apple Podcasts episode resolution: do NOT compare the `?i=` value directly with the RSS `guid` or `itunes:episode` — those are different namespaces. Single imports use the redirect-based slug match in `podcast.resolve_canonical_slug()`; batch mode bridges the two via the iTunes episode lookup (`trackId` → `episodeGuid`) and `resolve_episode_by_guid()`.
 - Frontmatter id keys (`youtube_id`, `apple_episode_id`, `episode_guid`) drive duplicate detection in the plugin and in `vault.scan_ids()`. Legacy notes without them are matched by parsing ids out of `url:` — keep both parsers in sync.
+- Local models: `main._stream_llm()` / `_resolve_llm()` dispatch `local:<id>` to `local_llm`, everything else to Claude. Local models cost $0, use the same chunking as Haiku for long transcripts (their context is small), and `stream_local()` refuses input that exceeds the model's `context_length`. mlx-serve silently answers with the *loaded* model for any unknown name, so `stream_local()` refuses models the server doesn't list — keep that guard.
 - Claude calls: `claude.resolve_model()` maps old plugin model ids to the current ones. Thinking is on by default for Sonnet 5 / Opus 5.5; `stream_claude()` appends only `text_delta`s and passes `output_config.effort` (never on Haiku). `stop_reason == "refusal"` becomes an SSE `error`.

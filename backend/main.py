@@ -19,6 +19,7 @@ import whisper as whisper_mod
 from whisper import transcribe_url as whisper_transcribe, WhisperUnavailableError, DEFAULT_SERVER_URL
 from note import build_obsidian_note
 from claude import stream_claude, parse_claude_response, resolve_model, DEFAULT_MODEL, DEFAULT_EXTENDED_MODEL, HAIKU, SONNET, OPUS
+import local_llm
 from cookies import has_cookies, save_cookies, delete_cookies
 import vault
 import batch_queue
@@ -162,7 +163,25 @@ MODEL_PRICING = {
 REFUSAL_MESSAGE = "Claude declined to process this content (safety refusal)."
 
 
+def _resolve_llm(model: str | None, default: str) -> str:
+    return model if local_llm.is_local(model) else resolve_model(model, default)
+
+
+def _llm_label(model: str) -> str:
+    if local_llm.is_local(model):
+        return local_llm.model_id(model)
+    return f"Claude {model.split('-')[1].capitalize()}"
+
+
+def _stream_llm(model: str, system_prompt: str, user_message: str, effort: str | None):
+    if local_llm.is_local(model):
+        return local_llm.stream_local(model, system_prompt, user_message)
+    return stream_claude(model, system_prompt, user_message, effort)
+
+
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    if local_llm.is_local(model):
+        return 0.0
     pricing = MODEL_PRICING[resolve_model(model, DEFAULT_MODEL)]
     return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
 
@@ -471,9 +490,9 @@ def _run_claude_and_note(
 
     use_extended_model = request.extended_summary or bool(request.focus_topic) or request.focus_include_extended
     if use_extended_model:
-        model = resolve_model(request.extended_model, DEFAULT_EXTENDED_MODEL)
+        model = _resolve_llm(request.extended_model, DEFAULT_EXTENDED_MODEL)
     else:
-        model = resolve_model(request.model, DEFAULT_MODEL)
+        model = _resolve_llm(request.model, DEFAULT_MODEL)
     effort = "medium" if use_extended_model else "low"
     if request.focus_topic:
         stage_label = "claude_focus"
@@ -485,7 +504,7 @@ def _run_claude_and_note(
     use_chunks = (
         source != "web"
         and not use_extended_model
-        and model == HAIKU
+        and (model == HAIKU or local_llm.is_local(model))
         and transcript_chars > _CHUNK_THRESHOLD_CHARS
     )
 
@@ -494,7 +513,7 @@ def _run_claude_and_note(
         n_chunks = len(chunks)
         yield _sse_event(
             stage_label,
-            f"Step 3/{total_steps} — Transcript split into {n_chunks} chunks for Haiku…",
+            f"Step 3/{total_steps} — Transcript split into {n_chunks} chunks for {_llm_label(model)}…",
             step=3, total_steps=total_steps,
         )
 
@@ -515,7 +534,7 @@ def _run_claude_and_note(
             )
             raw_chunk = None
             try:
-                for update in stream_claude(model, _CHUNK_CLEAN_SYSTEM, chunk_user, effort):
+                for update in _stream_llm(model, _CHUNK_CLEAN_SYSTEM, chunk_user, effort):
                     if update["type"] == "done":
                         if update["stop_reason"] == "refusal":
                             yield _sse_event("error", f"{REFUSAL_MESSAGE} (chunk {i + 1})")
@@ -524,7 +543,7 @@ def _run_claude_and_note(
                         total_in_tokens += update["input_tokens"]
                         total_out_tokens += update["output_tokens"]
             except Exception as e:
-                yield _sse_event("error", f"Claude API error on chunk {i + 1}: {e}")
+                yield _sse_event("error", f"{_llm_label(model)} error on chunk {i + 1}: {e}")
                 return
 
             if raw_chunk is None:
@@ -536,7 +555,7 @@ def _run_claude_and_note(
                 chunk_text = chunk_result.get("transcript", "")
                 cleaned_sections.append(f"## {heading}\n\n{chunk_text}")
             except Exception as e:
-                yield _sse_event("error", f"Invalid JSON from Claude on chunk {i + 1}: {e}")
+                yield _sse_event("error", f"Invalid JSON from {_llm_label(model)} on chunk {i + 1}: {e}")
                 return
 
         yield _sse_event(
@@ -554,7 +573,7 @@ def _run_claude_and_note(
         summary_raw = None
         chunk_summary_system = _build_chunk_summary_system(request.extract_resources, source)
         try:
-            for update in stream_claude(model, chunk_summary_system, summary_user, effort):
+            for update in _stream_llm(model, chunk_summary_system, summary_user, effort):
                 if update["type"] == "done":
                     if update["stop_reason"] == "refusal":
                         yield _sse_event("error", REFUSAL_MESSAGE)
@@ -563,14 +582,14 @@ def _run_claude_and_note(
                     total_in_tokens += update["input_tokens"]
                     total_out_tokens += update["output_tokens"]
         except Exception as e:
-            yield _sse_event("error", f"Claude API error on summary: {e}")
+            yield _sse_event("error", f"{_llm_label(model)} error on summary: {e}")
             return
 
         elapsed_total = time.time() - chunk_start_time
         cost = _estimate_cost(model, total_in_tokens, total_out_tokens)
         yield _sse_event(
             "claude_done",
-            f"Step 3/{total_steps} — Claude done! {_fmt_tokens(total_in_tokens)} in → {_fmt_tokens(total_out_tokens)} out ({_fmt_elapsed(elapsed_total)})",
+            f"Step 3/{total_steps} — {_llm_label(model)} done! {_fmt_tokens(total_in_tokens)} in → {_fmt_tokens(total_out_tokens)} out ({_fmt_elapsed(elapsed_total)}, {total_out_tokens / max(elapsed_total, 0.1):.0f} tok/s)",
             step=3, total_steps=total_steps,
             input_tokens=total_in_tokens, output_tokens=total_out_tokens,
             elapsed=round(elapsed_total, 1), cost_usd=round(cost, 4),
@@ -598,7 +617,7 @@ def _run_claude_and_note(
             task_desc = "summary + extended summary + transcript" if request.extended_summary else "summary + transcript"
         yield _sse_event(
             stage_label,
-            f"Step 3/{total_steps} — Sending to Claude ({model.split('-')[1].capitalize()})… Processing {task_desc}",
+            f"Step 3/{total_steps} — Sending to {_llm_label(model)}… Processing {task_desc}",
             step=3, total_steps=total_steps,
         )
 
@@ -651,15 +670,15 @@ Please process this transcript according to the instructions."""
 
         raw_response = None
         try:
-            for update in stream_claude(model, system_prompt, user_message, effort):
+            for update in _stream_llm(model, system_prompt, user_message, effort):
                 if update["type"] == "progress":
                     elapsed = _fmt_elapsed(update["elapsed"])
                     in_tok = _fmt_tokens(update["input_tokens"])
                     out_tok = _fmt_tokens(update["output_tokens"])
                     if update["phase"] == "starting":
-                        msg = f"Step 3/{total_steps} — Claude received {in_tok} input tokens, generating…"
+                        msg = f"Step 3/{total_steps} — {_llm_label(model)} received {in_tok} input tokens, generating…"
                     else:
-                        msg = f"Step 3/{total_steps} — Claude generating… {out_tok} output tokens ({elapsed})"
+                        msg = f"Step 3/{total_steps} — {_llm_label(model)} generating… {out_tok} output tokens ({elapsed})"
                     yield _sse_event(
                         stage_label, msg,
                         step=3, total_steps=total_steps,
@@ -678,7 +697,7 @@ Please process this transcript according to the instructions."""
                     cost = _estimate_cost(model, update["input_tokens"], update["output_tokens"])
                     yield _sse_event(
                         "claude_done",
-                        f"Step 3/{total_steps} — Claude done! {in_tok} in → {out_tok} out ({elapsed})",
+                        f"Step 3/{total_steps} — {_llm_label(model)} done! {in_tok} in → {out_tok} out ({elapsed}, {update['output_tokens'] / max(update['elapsed'], 0.1):.0f} tok/s)",
                         step=3, total_steps=total_steps,
                         input_tokens=update["input_tokens"],
                         output_tokens=update["output_tokens"],
@@ -686,7 +705,7 @@ Please process this transcript according to the instructions."""
                         cost_usd=round(cost, 4),
                     )
         except Exception as e:
-            yield _sse_event("error", f"Claude API error: {e}")
+            yield _sse_event("error", f"{_llm_label(model)} error: {e}")
             return
 
         if raw_response is None:
@@ -696,7 +715,7 @@ Please process this transcript according to the instructions."""
         try:
             result = parse_claude_response(raw_response)
         except Exception as e:
-            yield _sse_event("error", f"Claude returned invalid JSON: {e}")
+            yield _sse_event("error", f"{_llm_label(model)} returned invalid JSON: {e}")
             return
 
         summary = result.get("summary", "")
@@ -763,8 +782,8 @@ EST_SPREAD = 0.3
 def _batch_model(opts: BatchOptions) -> tuple[str, bool]:
     use_extended = opts.extended_summary or bool(opts.focus_topic) or opts.focus_include_extended
     if use_extended:
-        return resolve_model(opts.extended_model, DEFAULT_EXTENDED_MODEL), True
-    return resolve_model(opts.model, DEFAULT_MODEL), False
+        return _resolve_llm(opts.extended_model, DEFAULT_EXTENDED_MODEL), True
+    return _resolve_llm(opts.model, DEFAULT_MODEL), False
 
 
 def _estimate_item_cost(duration_s: int, opts: BatchOptions) -> float:
@@ -776,6 +795,8 @@ def _estimate_item_cost(duration_s: int, opts: BatchOptions) -> float:
     if opts.include_transcript:
         out += transcript
     chars = minutes * EST_CHARS_PER_MINUTE
+    if local_llm.is_local(model):
+        return 0.0
     if model == HAIKU and not use_extended and chars > _CHUNK_THRESHOLD_CHARS:
         n_chunks = math.ceil(chars / _CHUNK_CHARS)
         inp += n_chunks * EST_CHUNK_OVERHEAD_TOKENS + min(transcript, 10_000)  # + summary call
@@ -977,6 +998,11 @@ async def remove_cookies():
 @app.get("/cookies")
 async def cookies_status():
     return {"has_cookies": has_cookies()}
+
+
+@app.get("/local-models")
+async def local_models():
+    return {"url": local_llm.LOCAL_LLM_URL, **await asyncio.to_thread(local_llm.list_models)}
 
 
 @app.get("/health")

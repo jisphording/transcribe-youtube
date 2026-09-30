@@ -16,6 +16,7 @@ export interface YTObsidianSettings {
     resourcesFolder: string;        // Mentioned_Resources, shared by all sources
     whisperLanguage: string;        // "auto" or ISO 639-1 ("en", "de", …)
     keepWhisperWarm: boolean;       // start whisper-server on plugin load (vs. lazy on first use)
+    localModel: string;             // last Local dropdown choice ("local:<id>"), "" = use Claude
 }
 
 export type FolderKey = "youtubeFolder" | "podcastFolder" | "articleFolder" | "resourcesFolder";
@@ -30,6 +31,7 @@ export const DEFAULT_SETTINGS: YTObsidianSettings = {
     resourcesFolder: "Mentioned_Resources",
     whisperLanguage: "auto",
     keepWhisperWarm: false,
+    localModel: "",
 };
 
 export class YTObsidianSettingTab extends PluginSettingTab {
