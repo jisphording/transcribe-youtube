@@ -16,8 +16,8 @@ else
 fi
 
 for i in {1..20}; do
-    if curl -fs http://localhost:8000/health >/dev/null 2>&1; then
-        echo "✓ Backend healthy: http://localhost:8000"
+    if curl -fs http://127.0.0.1:8000/health >/dev/null 2>&1; then
+        echo "✓ Backend healthy: http://127.0.0.1:8000"
         exit 0
     fi
     sleep 0.5

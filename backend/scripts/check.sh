@@ -23,10 +23,10 @@ else
 fi
 
 section "backend health"
-if curl -fs http://localhost:8000/health >/dev/null 2>&1; then
+if curl -fs http://127.0.0.1:8000/health >/dev/null 2>&1; then
     ok "GET /health returned 200"
 else
-    err "backend unreachable at http://localhost:8000"
+    err "backend unreachable at http://127.0.0.1:8000"
 fi
 
 section "Python environment"

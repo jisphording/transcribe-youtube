@@ -104,8 +104,8 @@ step "Waiting for backend to come up"
 
 HEALTHY=0
 for i in {1..20}; do
-    if curl -fs http://localhost:8000/health >/dev/null 2>&1; then
-        ok "Backend healthy: http://localhost:8000"
+    if curl -fs http://127.0.0.1:8000/health >/dev/null 2>&1; then
+        ok "Backend healthy: http://127.0.0.1:8000"
         HEALTHY=1
         break
     fi
