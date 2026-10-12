@@ -15,6 +15,7 @@ import os
 import subprocess
 import tempfile
 import time
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -27,7 +28,8 @@ DEFAULT_LANGUAGE = "auto"
 USER_AGENT = "Obsidian-MediaTranscriber/1.0"
 
 LAUNCH_AGENT_LABEL = "com.whisper.server"
-START_TIMEOUT_SECONDS = 20.0
+START_TIMEOUT_SECONDS = 120.0
+_start_lock = threading.Lock()
 
 
 class WhisperUnavailableError(Exception):
@@ -54,26 +56,53 @@ def _service_target() -> str:
 
 
 def start_server(timeout: float = START_TIMEOUT_SECONDS, on_progress=None) -> bool:
-    """Kickstart the LaunchAgent and wait until /‎ responds. Idempotent."""
-    if is_available():
-        mark_activity()
-        return True
-
-    if on_progress:
-        on_progress("Starting whisper-server…")
-
-    subprocess.run(
-        ["launchctl", "kickstart", _service_target()],
-        check=False, capture_output=True,
-    )
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    """Start the registered LaunchAgent, allowing time for a cold model load."""
+    with _start_lock:
         if is_available():
             mark_activity()
             return True
-        time.sleep(0.4)
-    return False
+        if on_progress:
+            on_progress("Starting whisper-server (loading model)…")
+        try:
+            result = subprocess.run(
+                ["launchctl", "kickstart", _service_target()],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            # Login can leave an installed agent unregistered. Bootstrap it once.
+            plist = Path.home() / "Library/LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
+            if result.returncode and plist.is_file():
+                subprocess.run(
+                    ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)],
+                    check=False, capture_output=True, text=True, timeout=10,
+                )
+                result = subprocess.run(
+                    ["launchctl", "kickstart", _service_target()],
+                    check=False, capture_output=True, text=True, timeout=10,
+                )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise WhisperUnavailableError(f"Cannot start local whisper-server: {e}. Run ./backend/scripts/whisper-setup.sh") from e
+        if result.returncode:
+            detail = (result.stderr or result.stdout or "LaunchAgent is not registered").strip()
+            raise WhisperUnavailableError(
+                f"Cannot start local whisper-server: {detail[:500]}. "
+                "Run ./backend/scripts/whisper-setup.sh, then retry the failed imports."
+            )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if is_available(timeout=1):
+                mark_activity()
+                return True
+            time.sleep(0.4)
+        detail = ""
+        try:
+            lines = Path("/tmp/whisper-server.err").read_text(errors="replace").splitlines()
+            detail = " " + "\n".join(lines[-8:])[-1000:]
+        except OSError:
+            pass
+        raise WhisperUnavailableError(
+            f"Local whisper-server did not become ready within {timeout:.0f}s.{detail} "
+            "Check /tmp/whisper-server.err or run ./backend/scripts/whisper-setup.sh."
+        )
 
 
 def stop_server() -> None:
@@ -123,12 +152,9 @@ def transcribe_url(
     """
     with in_flight():
         if not is_available(server_url):
-            if not start_server(on_progress=on_progress):
-                raise WhisperUnavailableError(
-                    f"Local whisper-server failed to start within {START_TIMEOUT_SECONDS:.0f}s.\n\n"
-                    "Check /tmp/whisper-server.err, or run:\n"
-                    "  ./backend/scripts/whisper-setup.sh"
-                )
+            if server_url.rstrip("/") != DEFAULT_SERVER_URL:
+                raise WhisperUnavailableError(f"Whisper server is not reachable at {server_url}.")
+            start_server(on_progress=on_progress)
 
         if on_progress:
             on_progress("Downloading audio…")

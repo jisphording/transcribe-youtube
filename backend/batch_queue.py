@@ -84,8 +84,12 @@ def init_db() -> None:
     with _connect() as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
+        if "hidden" not in {r[1] for r in conn.execute("PRAGMA table_info(batches)")}:
+            conn.execute("ALTER TABLE batches ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
         conn.executemany("INSERT OR IGNORE INTO lanes(name) VALUES (?)", [(l,) for l in LANES])
         # The worker died mid-item: run it again
+        conn.execute("UPDATE items SET state='cancelled' WHERE state='running' "
+                     "AND batch_id IN (SELECT id FROM batches WHERE state='cancelled')")
         conn.execute("UPDATE items SET state='pending', started_at=NULL WHERE state='running'")
     expire_unconfirmed()
 
@@ -104,7 +108,7 @@ def create_batch(
     batch_id = uuid.uuid4().hex[:12]
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO batches VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO batches(id,created_at,state,source,source_url,title,options_json,vault_json,estimate_json) VALUES (?,?,?,?,?,?,?,?,?)",
             (batch_id, time.time(), "pending_confirmation", source, source_url, title,
              json.dumps(options), json.dumps(vault), json.dumps(estimate)),
         )
@@ -131,7 +135,7 @@ def confirm(batch_id: str) -> bool:
     expire_unconfirmed()
     with _connect() as conn:
         ok = conn.execute(
-            "UPDATE batches SET state='queued' WHERE id=? AND state='pending_confirmation'", (batch_id,)
+            "UPDATE batches SET state='queued', hidden=0 WHERE id=? AND state='pending_confirmation'", (batch_id,)
         ).rowcount == 1
     if ok:
         wake()
@@ -155,7 +159,7 @@ def retry_failed(batch_id: str) -> int:
             "UPDATE items SET state='pending', error=NULL, started_at=NULL, finished_at=NULL"
             " WHERE batch_id=? AND state='failed'", (batch_id,)).rowcount
         if n:
-            conn.execute("UPDATE batches SET state='queued' WHERE id=?", (batch_id,))
+            conn.execute("UPDATE batches SET state='queued', hidden=0 WHERE id=?", (batch_id,))
     if n:
         wake()
     return n
@@ -195,10 +199,29 @@ def get_batch(batch_id: str, with_vault: bool = False) -> dict | None:
 def list_batches(limit: int = 10) -> list[dict]:
     expire_unconfirmed()
     with _connect() as conn:
+        # Active work must stay visible even when there are many newer previews.
         rows = conn.execute(
-            "SELECT * FROM batches WHERE state != 'expired' ORDER BY created_at DESC LIMIT ?", (limit,)
+            "SELECT * FROM batches WHERE hidden=0 AND (state='queued' OR (state != 'expired' AND id IN "
+            "(SELECT id FROM batches WHERE hidden=0 AND state NOT IN ('queued','expired','pending_confirmation') "
+            "ORDER BY created_at DESC LIMIT ?))) "
+            "ORDER BY CASE WHEN state='queued' THEN 0 ELSE 1 END, "
+            "CASE WHEN state='queued' THEN created_at ELSE -created_at END", (max(0, min(limit, 200)),)
         ).fetchall()
         return [_batch_dict(conn, r) for r in rows]
+
+
+def remove_finished(batch_id: str | None = None) -> int:
+    """Hide finished history, preserving notes and the hourly pacing ledger."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id FROM batches WHERE hidden=0 AND state IN ('done','cancelled','expired') "
+            "AND NOT EXISTS (SELECT 1 FROM items WHERE batch_id=batches.id "
+            "AND state IN ('pending','running')) "
+            "AND (? IS NULL OR id=?)", (batch_id, batch_id),
+        ).fetchall()
+        for row in rows:
+            conn.execute("UPDATE batches SET hidden=1 WHERE id=?", (row["id"],))
+    return len(rows)
 
 
 # ─── Lanes ───────────────────────────────────────────────────────────────────
@@ -261,9 +284,22 @@ def clear_block(name: str) -> None:
 
 # ─── Worker ──────────────────────────────────────────────────────────────────
 
-def _mark_running(item_id: int) -> None:
+def _mark_running(item_id: int) -> bool:
     with _connect() as conn:
-        conn.execute("UPDATE items SET state='running', started_at=?, progress=NULL WHERE id=?", (time.time(), item_id))
+        return conn.execute(
+            "UPDATE items SET state='running', started_at=?, progress=NULL WHERE id=? "
+            "AND state='pending' AND batch_id IN (SELECT id FROM batches WHERE state='queued')",
+            (time.time(), item_id),
+        ).rowcount == 1
+
+
+def set_metadata(item_id: int, title: str, duration_s: int) -> None:
+    with _connect() as conn:
+        conn.execute("UPDATE items SET title=?, duration_s=? WHERE id=?", (title, duration_s, item_id))
+        conn.execute(
+            "UPDATE batches SET title=? WHERE id=(SELECT batch_id FROM items WHERE id=?) "
+            "AND (SELECT COUNT(*) FROM items WHERE batch_id=batches.id)=1", (title, item_id),
+        )
 
 
 def set_progress(item_id: int, message: str) -> None:
@@ -330,8 +366,9 @@ async def run_worker(process_item: Callable[[dict, dict], dict]) -> None:
                     pass
                 continue
 
+            if not _mark_running(item["id"]):
+                continue
             batch = get_batch(item["batch_id"], with_vault=True)
-            _mark_running(item["id"])
             try:
                 result = await asyncio.to_thread(process_item, item, batch)
             except Exception as e:

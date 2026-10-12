@@ -2,7 +2,7 @@ import { ItemView, Notice, WorkspaceLeaf, setIcon } from "obsidian";
 import type YTObsidianPlugin from "./main";
 import {
     Batch, BatchItem, ItemState, Lane, QueueStatus,
-    cancelBatch, fmtDuration, fmtUsd, getQueue, resumeLane, retryBatch,
+    cancelBatch, clearFinished, removeFinished, fmtDuration, fmtUsd, getQueue, resumeLane, retryBatch,
 } from "./batch-api";
 
 export const QUEUE_VIEW_TYPE = "media-import-queue";
@@ -25,6 +25,7 @@ export class QueueView extends ItemView {
     plugin: YTObsidianPlugin;
     private timer: number | null = null;
     private bodyEl: HTMLElement;
+    private refreshVersion = 0;
 
     constructor(leaf: WorkspaceLeaf, plugin: YTObsidianPlugin) {
         super(leaf);
@@ -52,6 +53,21 @@ export class QueueView extends ItemView {
         header.style.alignItems = "center";
         header.style.justifyContent = "space-between";
         header.createEl("h4", { text: "Import queue" }).style.margin = "4px 0 8px";
+        const clearBtn = root.createEl("button", { text: "Clear finished imports" });
+        clearBtn.title = "Remove completed, failed and cancelled imports from this list. Saved notes are kept.";
+        clearBtn.style.marginBottom = "8px";
+        clearBtn.addEventListener("click", async () => {
+            clearBtn.disabled = true;
+            try {
+                const result = await clearFinished(this.apiUrl);
+                new Notice(`Cleared ${result.removed} finished imports. Saved notes are kept.`);
+                await this.refresh();
+            } catch (e) {
+                new Notice(e.message);
+            } finally {
+                clearBtn.disabled = false;
+            }
+        });
         const refreshBtn = header.createEl("button", { attr: { "aria-label": "Refresh" } });
         setIcon(refreshBtn, "refresh-cw");
         refreshBtn.addEventListener("click", () => this.refresh());
@@ -70,23 +86,33 @@ export class QueueView extends ItemView {
     }
 
     async refresh() {
+        const version = ++this.refreshVersion;
         let status: QueueStatus;
         try {
             status = await getQueue(this.apiUrl);
         } catch (e) {
+            if (version !== this.refreshVersion) return;
             this.bodyEl.empty();
             this.muted(this.bodyEl, `Backend not reachable: ${e.message}`);
             return;
         }
+        if (version !== this.refreshVersion) return;
         this.bodyEl.empty();
         this.renderLane(status, "youtube", "YouTube");
         this.renderLane(status, "podcast", "Podcasts");
         const batches = status.batches.filter((b) => b.state !== "pending_confirmation");
         if (!batches.length) {
-            this.muted(this.bodyEl, "No batches yet. Paste a channel, playlist or podcast show URL into Import Media.");
+            this.muted(this.bodyEl, "Queue is empty. Add videos, podcast episodes, channels, playlists or shows using Import Media.");
             return;
         }
-        for (const batch of batches) this.renderBatch(batch);
+        const active = batches.filter((b) => b.counts.running);
+        const pending = batches.filter((b) => !b.counts.running && (b.counts.pending ?? 0) > 0);
+        const finished = batches.filter((b) => !b.counts.running && !(b.counts.pending ?? 0));
+        for (const [label, entries] of [["In progress", active], ["To do", pending], ["Finished", finished]] as [string, Batch[]][]) {
+            if (!entries.length) continue;
+            this.bodyEl.createEl("h5", { text: label });
+            for (const batch of entries) this.renderBatch(batch);
+        }
     }
 
     private muted(parent: HTMLElement, text: string): HTMLElement {
@@ -133,7 +159,7 @@ export class QueueView extends ItemView {
         const finished = total - (batch.counts.pending ?? 0) - (batch.counts.running ?? 0);
         const title = box.createDiv({ text: `${batch.source === "podcast" ? "🎙" : "▶"} ${batch.title || batch.source_url}` });
         title.style.fontWeight = "600";
-        this.muted(box, `${batch.state} · ${finished}/${total} · cost ${fmtUsd(batch.cost_usd)} (est. ${fmtUsd(batch.estimate.low)}–${fmtUsd(batch.estimate.high)})`);
+        this.muted(box, `${batch.state} · ${finished}/${total} · cost ${fmtUsd(batch.cost_usd)}${batch.estimate.unknown ? "" : ` (est. ${fmtUsd(batch.estimate.low)}–${fmtUsd(batch.estimate.high)})`}`);
 
         const btnRow = box.createDiv();
         btnRow.style.display = "flex";
@@ -152,6 +178,13 @@ export class QueueView extends ItemView {
             });
         }
 
+        if (!(batch.counts.pending ?? 0) && !(batch.counts.running ?? 0)) {
+            btnRow.createEl("button", { text: "Remove" }).addEventListener("click", async () => {
+                await removeFinished(this.apiUrl, batch.id).catch((e) => new Notice(e.message));
+                this.refresh();
+            });
+        }
+
         const list = box.createDiv();
         for (const item of batch.items) this.renderItem(list, item);
     }
@@ -161,7 +194,7 @@ export class QueueView extends ItemView {
         row.style.fontSize = "12px";
         row.style.padding = "2px 0";
         const line = row.createDiv();
-        line.setText(`${STATE_ICON[item.state]} ${item.title} · ${fmtDuration(item.duration_s)}`);
+        line.setText(`${STATE_ICON[item.state]} ${item.title}${item.duration_s ? ` · ${fmtDuration(item.duration_s)}` : ""}`);
         if (item.note_path) {
             line.style.cursor = "pointer";
             line.style.textDecoration = "underline";

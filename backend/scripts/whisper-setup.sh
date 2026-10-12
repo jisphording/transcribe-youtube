@@ -77,7 +77,7 @@ fi
 
 # ─── 3. Install LaunchAgent for whisper-server ───────────────────────────────
 
-step "Installing LaunchAgent for whisper-server (auto-start on login)"
+step "Installing LaunchAgent for whisper-server (start on demand)"
 
 mkdir -p "$LAUNCH_AGENTS_DIR"
 
@@ -135,8 +135,9 @@ step "Smoke-testing whisper-server on http://127.0.0.1:${WHISPER_PORT}"
 launchctl kickstart "gui/$(id -u)/${LABEL}" >/dev/null 2>&1 || true
 
 verified=0
-for _ in {1..30}; do
-    if curl -fs --max-time 1 "http://127.0.0.1:${WHISPER_PORT}/" -o /dev/null 2>&1; then
+for _ in {1..120}; do
+    status_code=$(curl -s --max-time 1 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${WHISPER_PORT}/" || true)
+    if [[ "$status_code" == "200" || "$status_code" == "404" ]]; then
         verified=1
         break
     fi
@@ -157,5 +158,5 @@ if [[ "$verified" == "1" ]]; then
     exit 0
 fi
 
-err "whisper-server did not respond within 30s during smoke test. Check /tmp/whisper-server.err"
+err "whisper-server did not respond within 120s during smoke test. Check /tmp/whisper-server.err"
 exit 1

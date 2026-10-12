@@ -64,7 +64,7 @@ Modular TypeScript plugin with one file per concern:
 | `url-utils.ts` | `detectSource()` (YouTube vs Apple Podcasts vs web vs null), `detectCollection()` (channel / playlist / show — mirror of the backend detectors), `extractVideoId()`, `extractAppleEpisodeId/ShowId()`, `cleanWebUrl()` (mirror of `web.clean_url`), `collectKnownIds()` + `findExistingNote()` (frontmatter ids via `metadataCache`, content scan as fallback) | — |
 | `batch-api.ts` | Types + fetch helpers for the `/batch` endpoints | — |
 | `batch-panel.ts` | `BatchPanel` — batch section of the Import modal (count, min length, preview + cost estimate, confirm) | `main` (type only), `url-utils`, `batch-api` |
-| `queue-view.ts` | `QueueView` — sidebar that polls `GET /batch` (progress, lane status, cancel / retry / resume) | `main` (type only), `batch-api` |
+| `queue-view.ts` | `QueueView` — sidebar that polls `GET /batch` (In progress / To do / Finished groups, lane status, cancel / retry / resume / remove / clear finished) | `main` (type only), `batch-api` |
 
 **Rules:**
 - `sse-handler.ts`, `url-utils.ts` and `batch-api.ts` are pure modules with no plugin dependencies — they must not import from `main`, `settings`, or `import-modal`.
@@ -79,11 +79,13 @@ Frontend ↔ Backend communicate via:
 - `POST /process` — SSE stream for the import pipeline. Same endpoint for YouTube and podcasts; backend detects source from the URL.
 - `GET/POST/DELETE /cookies` — Cookie file management
 - `GET /whisper/status` — Reports whether whisper-server is running, plus `last_activity`, `in_flight`, `idle_timeout_seconds`
-- `POST /whisper/start` — Kickstart the whisper-server LaunchAgent (blocks until reachable, ~1–3 s). Idempotent.
+- `POST /whisper/start` — Kickstart the whisper-server LaunchAgent (blocks until reachable, up to 120 s on cold starts). Idempotent.
 - `POST /whisper/stop` — `launchctl kill SIGTERM` the LaunchAgent. Refuses if a transcription is in-flight.
 - `POST /batch` — list + filter + dedup + estimate a channel / playlist / show; creates a `pending_confirmation` batch (expires after 30 min)
 - `POST /batch/{id}/confirm` · `/cancel` · `/retry` (failed items) · `POST /batch/lanes/{lane}/resume` (lift a block early)
-- `GET /batch` (recent batches + item states + lane status) · `GET /batch/{id}`
+- `POST /queue` — immediately enqueue a single video or episode with output options and vault paths; no metadata/network work before acceptance.
+- `DELETE /batch` / `DELETE /batch/{id}` — hide finished history; preserve notes, active work and the hourly pacing ledger.
+- `GET /batch` (all active batches plus recent finished history + item states + lane status) · `GET /batch/{id}`
 - `GET /local-models` — `{server, models}`; each model has `status` `loaded` / `unloaded` / `switch` (installed in another folder — pick it in the MLX Core menu) / `offline`. The modal shows the "Local" dropdown (with ↻ refresh) only when the list is non-empty; `switch` / `offline` entries are disabled
 - `GET /health` — Health check
 
@@ -103,7 +105,8 @@ The `/process` endpoint runs a 4-step SSE streaming pipeline. Steps 1–2 differ
 3. **Claude** — `claude.stream_claude()` with `prompts.get_system_prompt(features, source="youtube")`
 4. **Note** — `note.build_obsidian_note()` assembles the final markdown
 
-### Batch queue (channels, playlists, podcast shows)
+### Import queue (single videos/episodes, channels, playlists, podcast shows)
+Single video/episode imports use `POST /queue`, close the modal immediately, and share the same persistent worker as batches. Web articles retain `/process` and the manual-paste fallback. Queue controls archive finished rows via the `hidden` column rather than deleting items, preserving the YouTube hourly cap. Active work is never excluded by the history limit.
 1. **Preview** — `POST /batch`: `youtube.list_collection()` (flat yt-dlp listing of the `/videos` tab or a playlist — durations included, Shorts and `duration=None` dropped) or `podcast.list_show_episodes()` (iTunes `entity=podcastEpisode` → `trackId` + `episodeGuid`, joined to the RSS feed by guid; max 200; missing durations are estimated from the show's median). Items whose ids are in `known_ids` (plugin, `metadataCache`) or `vault.scan_ids()` are skipped: the listing always covers the whole window (up to 200), duplicates are dropped and the first `count` new items are returned, plus `skipped_duplicates` / `searched` / `window_exhausted` so the plugin can say "everything is already in your vault". Per-item cost comes from `_estimate_item_cost()` (duration heuristic, constants at the top of the batch section in `main.py`).
 2. **Confirm** — the batch becomes `queued`; the worker in `lifespan` picks it up.
 3. **Worker** — one item at a time via `_process_batch_item()`: re-scan the vault for the id → run the normal `_run_youtube_pipeline` / `_run_podcast_pipeline` generator (with `skip_live`, `episode_guid`, `sleep_requests`) → `vault.write_note()` + `vault.create_resource_stubs()`. The backend is the note writer here (the plugin sends absolute paths; `vault.validate_paths` keeps writes inside the vault).
@@ -183,7 +186,7 @@ After changing `backend/.env`, restart with `stop.sh` then `start.sh`.
 #### Lifecycle
 
 - The Obsidian plugin posts `POST /whisper/start` on plugin load when `keepWhisperWarm` is on, and `POST /whisper/stop` on `onunload`.
-- When `keepWhisperWarm` is off (default), whisper-server stays stopped until `_run_podcast_pipeline` falls through the RSS-transcript check; `whisper.transcribe_url` then lazy-starts the agent (~1–3 s) before transcribing.
+- When `keepWhisperWarm` is off (default), whisper-server stays stopped until `_run_podcast_pipeline` falls through the RSS-transcript check; `whisper.transcribe_url` then lazy-starts the agent (up to 120 s on cold starts) before transcribing.
 - A background task in `main.py`'s FastAPI `lifespan` polls every 60 s and stops the server after `WHISPER_IDLE_TIMEOUT_SECONDS` (1800 s) of inactivity. The `_in_flight` counter in `whisper.py` blocks the watcher from killing the server during a long transcription.
 - `last_activity` is bumped by `whisper.mark_activity()`, called from `start_server` and the `in_flight` context manager exit. The watcher treats `last_activity == 0` (server up but no observed activity, e.g. started by some other process) as activity-now.
 

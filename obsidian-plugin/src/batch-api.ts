@@ -7,6 +7,7 @@ export interface BatchEstimate {
     total: number;
     low: number;
     high: number;
+    unknown?: boolean;
 }
 
 export interface PreviewItem {
@@ -107,7 +108,20 @@ export const confirmBatch = (apiUrl: string, id: string) => call<Batch>(apiUrl, 
 export const cancelBatch = (apiUrl: string, id: string) => call<Batch>(apiUrl, `/batch/${id}/cancel`, "POST");
 export const retryBatch = (apiUrl: string, id: string) => call<{ retried: number }>(apiUrl, `/batch/${id}/retry`, "POST");
 export const resumeLane = (apiUrl: string, lane: string) => call<unknown>(apiUrl, `/batch/lanes/${lane}/resume`, "POST");
-export const getQueue = (apiUrl: string) => call<QueueStatus>(apiUrl, "/batch?limit=10");
+export const getQueue = (apiUrl: string) => call<QueueStatus>(apiUrl, "/batch?limit=200");
+
+export interface QueueItemBody {
+    url: string;
+    options: BatchOptions;
+    vault_root: string;
+    folders: { youtube: string; podcast: string; resources: string };
+    scan_roots: string[];
+    allow_duplicate: boolean;
+}
+
+export const enqueueItem = (apiUrl: string, body: QueueItemBody) => call<Batch>(apiUrl, "/queue", "POST", body);
+export const clearFinished = (apiUrl: string) => call<{ removed: number }>(apiUrl, "/batch", "DELETE");
+export const removeFinished = (apiUrl: string, id: string) => call<{ removed: number }>(apiUrl, `/batch/${id}`, "DELETE");
 
 export function fmtDuration(seconds: number): string {
     const h = Math.floor(seconds / 3600);

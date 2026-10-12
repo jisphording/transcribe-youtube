@@ -285,7 +285,7 @@ The script is idempotent. It:
 By default, `whisper-server` is **off** until needed. The flow is:
 
 - The Obsidian plugin queries `GET /whisper/status` to show live state in the settings tab.
-- When you import a podcast that needs whisper (no RSS transcript), the backend lazy-starts the server (~1–3 s model load) and transcribes.
+- When you import a podcast that needs whisper (no RSS transcript), the backend lazy-starts the server (up to 120 s for a cold model load) and transcribes.
 - After **30 minutes of inactivity**, the backend's idle watcher stops the server. Memory goes back to zero.
 - A "Keep whisper-server warm" toggle in plugin settings flips this to eager mode: the server starts when Obsidian opens and stops when Obsidian closes (the 30-min idle stop still applies as a safety net).
 - The settings tab also has explicit Start / Stop buttons for manual control.
@@ -306,7 +306,7 @@ launchctl kill SIGTERM gui/$(id -u)/com.whisper.server   # stop
 tail -f /tmp/whisper-server.log /tmp/whisper-server.err  # logs
 ```
 
-**Performance note:** an M-series Mac with Metal acceleration transcribes a 60-minute podcast in roughly 3–5 minutes. The Obsidian modal shows real-time download + transcription progress.
+**Performance note:** an M-series Mac with Metal acceleration transcribes a 60-minute podcast in roughly 3–5 minutes. The import queue sidebar shows processing progress.
 
 ---
 
@@ -321,9 +321,9 @@ tail -f /tmp/whisper-server.log /tmp/whisper-server.err  # logs
 2. Pick Transcript (shown as **Summary** for articles) / Extended Summary / Focus Topic mode
 3. (Podcast only) Whisper language: `auto` works in most cases; set `en`, `de`, etc. if auto-detect picks the wrong one on short clips
 4. Pick a Claude model
-5. **Import** (or press Enter)
+5. For videos and podcast episodes, click **Add to queue** (or press Enter). The modal closes and the **Import queue** sidebar opens immediately; you can add another URL while the current item runs. Articles use **Import** and open the resulting note automatically.
 
-The new note opens automatically. Videos over ~90 minutes start getting unreliable (YouTube rate-limits, transcripts truncate); Sonnet or Opus handles long videos better than Haiku. Podcasts of any length work, but whisper transcription scales linearly with duration (~3–5 min per hour on M-series).
+Queued notes are saved automatically; click a completed item in the sidebar to open its note. Videos over ~90 minutes start getting unreliable (YouTube rate-limits, transcripts truncate); Sonnet or Opus handles long videos better than Haiku. Podcasts of any length work, but whisper transcription scales linearly with duration (~3–5 min per hour on M-series).
 
 ### Batch import (channels, playlists, podcast shows)
 
@@ -334,13 +334,15 @@ The new note opens automatically. Videos over ~90 minutes start getting unreliab
 5. **Start import** queues the batch and opens the **Import queue** sidebar (`Cmd+P` → *Show import queue*)
 
 How the queue behaves:
+- Single videos, podcast episodes and confirmed batches share one persistent worker. Items run in submission order among lanes that are ready; a paced or blocked YouTube lane allows podcasts to proceed.
+- The sidebar groups imports into **In progress**, **To do** and **Finished**. **Cancel** stops pending items; a running item finishes. **Retry failed** requeues failed items. **Remove** hides one finished import; **Clear finished imports** hides all completed, failed and cancelled imports. These controls keep your saved notes and preserve pacing history.
 - One item at a time. YouTube items get a random 15–45 s pause and at most 60 per hour, to stay clear of YouTube's bot checks; podcasts only pause briefly (whisper is the bottleneck).
 - Channels use the *Videos* tab only — Shorts and livestreams are skipped.
 - If YouTube blocks the Mac ("confirm you're not a bot"), the YouTube lane pauses for 30 min, then 2 h, then 6 h; podcast items keep going. *Resume now* in the sidebar lifts the pause early.
 - The queue lives in `backend/data/batch.db` and survives restarts; an item interrupted by a crash simply runs again.
 - Right before writing, the backend checks the vault again, so an item you imported by hand in the meantime is skipped.
 - Apple lists at most 200 episodes per show. Unconfirmed previews expire after 30 minutes.
-- Batch import needs the desktop app: the backend writes into the vault folder on disk.
+- Queued video and podcast imports need the desktop app: the backend writes into the vault folder on disk.
 
 ### Plugin settings
 
@@ -449,8 +451,8 @@ The Safari default only applies to fresh plugin installs. Open **Settings → Yo
 ```
 Common cause: `uv sync` broke because a pin is unavailable. Roll back `pyproject.toml`/`uv.lock` with `git checkout` and rerun `./scripts/update.sh`.
 
-**Podcast import fails: "Local whisper-server failed to start within 20s".**
-The backend tried to lazy-start `whisper-server` via `launchctl kickstart` but it never came up. First check whether the LaunchAgent exists at all (`ls ~/Library/LaunchAgents/com.whisper.server.plist`). If missing, run `backend/scripts/whisper-setup.sh`. If present, check `/tmp/whisper-server.err` — most failures are model-path problems or a port collision. As a quick test: `launchctl kickstart gui/$(id -u)/com.whisper.server && sleep 3 && curl http://127.0.0.1:2022/`.
+**Podcast import fails to start local whisper-server (including the old "within 20s" error).**
+Startup now allows up to 120 seconds for model loading and reports `launchctl` errors immediately. An installed but unregistered LaunchAgent is bootstrapped automatically. Check `~/Library/LaunchAgents/com.whisper.server.plist`; if missing, run `./backend/scripts/whisper-setup.sh` from the repository root to install the server, model and service. If startup still fails, check `/tmp/whisper-server.err` for a missing model, Metal error or port collision. After fixing setup, click **Retry failed** in the queue sidebar.
 
 **Whisper transcription fails: `whisper-server error 404: File Not Found (/v1/audio/transcriptions)`.**
 You're on stale backend code. whisper.cpp's `whisper-server` exposes `/inference`, not the OpenAI-compatible `/v1/audio/transcriptions` path. `backend/whisper.py` now posts to `/inference` — `git pull` and `./scripts/stop.sh && ./scripts/start.sh` to pick it up.

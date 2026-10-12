@@ -3,7 +3,7 @@ import type YTObsidianPlugin from "./main";
 import { detectSource, detectCollection, extractVideoId, extractAppleEpisodeId, cleanWebUrl, findExistingNote, MediaSource, CollectionSource } from "./url-utils";
 import { processSSEStream, ManualPasteRequiredError } from "./sse-handler";
 import { BatchPanel } from "./batch-panel";
-import type { BatchOptions } from "./batch-api";
+import { enqueueItem, BatchOptions } from "./batch-api";
 
 const MODEL_HAIKU = "claude-haiku-4-5";
 const MODEL_SONNET = "claude-sonnet-5";
@@ -415,6 +415,7 @@ export class YouTubeImportModal extends Modal {
             this.sourceBadgeEl.style.display = "none";
             this.podcastOptionsWrapper.style.display = "none";
         }
+        this.importBtn.setText(this.detectedSource === "web" ? "Import" : "Add to queue");
         // Articles have no transcript — the default mode is a plain summary.
         this.modeToggleBtns[0].setText(this.detectedSource === "web" ? "Summary" : "Transcript");
     }
@@ -442,7 +443,7 @@ export class YouTubeImportModal extends Modal {
                 const existing = await findExistingNote(this.app, folder, marker);
                 if (existing) {
                     this.setStatus(
-                        `⚠️ Already imported as "${existing.path}". Click Import again to overwrite.`,
+                        `⚠️ Already imported as "${existing.path}". Choose Import anyway to create another note.`,
                         "warning"
                     );
                     this.skipDuplicateCheck = true;
@@ -465,6 +466,7 @@ export class YouTubeImportModal extends Modal {
                 }
             }
         }
+        const allowDuplicate = this.skipDuplicateCheck;
         this.skipDuplicateCheck = false;
 
         if (this.importMode === "focus_topic" && !this.focusTopicInput.value.trim()) {
@@ -483,10 +485,21 @@ export class YouTubeImportModal extends Modal {
 
         try {
             const apiUrl = this.plugin.settings.apiUrl.replace(/\/$/, "");
+            if (source === "youtube" || source === "podcast") {
+                const targets = this.plugin.batchTargets();
+                if (!targets) throw new Error("Queued imports need the desktop app and a vault accessible to the backend.");
+                await enqueueItem(apiUrl, {
+                    url, options: this.collectOptions(source),
+                    vault_root: targets.vaultRoot, folders: targets.folders,
+                    scan_roots: targets.scanRoots, allow_duplicate: allowDuplicate,
+                });
+                new Notice("Added to import queue. It will start automatically when the worker is ready.");
+                this.close();
+                await this.plugin.activateQueueView();
+                return;
+            }
             const body: Record<string, string | boolean> = { url, ...this.collectOptions(source) };
-            if (source === "youtube") {
-                body.cookie_browser = "safari";
-            } else if (manualText) {
+            if (manualText) {
                 body.manual_text = manualText;
             }
 

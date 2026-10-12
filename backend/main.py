@@ -8,12 +8,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
-from models import TranscriptRequest, CookieUpload, BatchRequest, BatchOptions
+from models import TranscriptRequest, CookieUpload, BatchRequest, BatchOptions, QueueItemRequest
 from youtube import (
     is_youtube_url, extract_video_id, get_video_metadata, get_transcript, transcript_to_plain_text,
     YouTubeBlockedError, LIVE_STATUSES, is_youtube_collection_url, list_collection,
 )
-from podcast import is_apple_podcast_url, resolve_episode, resolve_episode_by_guid, get_rss_transcript, is_apple_show_url, list_show_episodes
+from podcast import parse_apple_url, is_apple_podcast_url, resolve_episode, resolve_episode_by_guid, get_rss_transcript, is_apple_show_url, list_show_episodes
 from web import is_web_url, fetch_article, pasted_article, trim_to_body, set_word_count, WebFetchError, MAX_TEXT_CHARS
 import whisper as whisper_mod
 from whisper import transcribe_url as whisper_transcribe, WhisperUnavailableError, DEFAULT_SERVER_URL
@@ -555,7 +555,8 @@ def _run_youtube_pipeline(request: TranscriptRequest, total_steps: int):
     yield _sse_event(
         "metadata_done",
         f"Step 1/{total_steps} — Got metadata: {metadata['title']} ({metadata.get('duration', '?')})",
-        step=1, total_steps=total_steps,
+        step=1, total_steps=total_steps, title=metadata["title"],
+        duration_seconds=metadata.get("duration_seconds", 0),
     )
 
     # Step 2: Transcript
@@ -615,7 +616,8 @@ def _run_podcast_pipeline(request: TranscriptRequest, total_steps: int):
     yield _sse_event(
         "metadata_done",
         f"Step 1/{total_steps} — Found episode: {metadata['title']} ({metadata.get('duration', '?')})",
-        step=1, total_steps=total_steps,
+        step=1, total_steps=total_steps, title=metadata["title"],
+        duration_seconds=metadata.get("duration_seconds", 0),
     )
     if match_info.get("strategy") == "slug-token":
         yield _sse_event(
@@ -647,7 +649,7 @@ def _run_podcast_pipeline(request: TranscriptRequest, total_steps: int):
         if not whisper_mod.is_available(DEFAULT_SERVER_URL):
             yield _sse_event(
                 "transcript_whisper_starting",
-                f"Step 2/{total_steps} — Starting local whisper-server (loading model, ~3s)…",
+                f"Step 2/{total_steps} — Starting local whisper-server (loading model; cold starts can take up to 2 minutes)…",
                 step=2, total_steps=total_steps,
             )
 
@@ -1272,6 +1274,43 @@ async def batch_create(req: BatchRequest):
     }
 
 
+@app.post("/queue")
+async def queue_single(req: QueueItemRequest):
+    """Enqueue immediately; metadata and transcription happen in the worker."""
+    source = _detect_source(req.url)
+    if source not in ("youtube", "podcast") or is_youtube_collection_url(req.url) or is_apple_show_url(req.url):
+        raise HTTPException(400, "Enter a single YouTube video or Apple Podcasts episode URL.")
+    try:
+        vault.validate_paths(req.vault_root, [req.folders.youtube, req.folders.podcast, req.folders.resources, *req.scan_roots])
+        external_id = extract_video_id(req.url) if source == "youtube" else parse_apple_url(req.url)[1]
+        if not external_id:
+            raise ValueError("Could not identify the video or episode from this URL.")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    options = req.options.model_dump()
+    options["allow_duplicate"] = req.allow_duplicate
+    batch_id = batch_queue.create_batch(
+        source, req.url, req.url, options,
+        {"vault_root": req.vault_root, "folders": req.folders.model_dump(), "scan_roots": req.scan_roots},
+        {"model": _batch_model(req.options)[0], "total": 0, "low": 0, "high": 0, "unknown": True},
+        [{"url": req.url, "external_id": external_id, "title": req.url, "duration_seconds": 0}],
+    )
+    batch_queue.confirm(batch_id)
+    return batch_queue.get_batch(batch_id)
+
+
+@app.delete("/batch")
+async def queue_clear_finished():
+    return {"removed": batch_queue.remove_finished()}
+
+
+@app.delete("/batch/{batch_id}")
+async def queue_remove_finished(batch_id: str):
+    if not batch_queue.remove_finished(batch_id):
+        raise HTTPException(409, "Only finished imports can be removed. Cancel pending work first; a running item must finish.")
+    return {"removed": 1}
+
+
 @app.post("/batch/{batch_id}/confirm")
 async def batch_confirm(batch_id: str):
     if not batch_queue.confirm(batch_id):
@@ -1320,6 +1359,8 @@ def _run_batch_pipeline(request: TranscriptRequest, source: str, item_id: int) -
     for raw in pipeline(request, 4):
         event = json.loads(raw)
         stage = event["stage"]
+        if stage == "metadata_done" and event.get("title"):
+            batch_queue.set_metadata(item_id, event["title"], event.get("duration_seconds") or 0)
         if stage == "claude_done":
             cost += event.get("cost_usd") or 0
         elif stage == "error":
@@ -1342,13 +1383,15 @@ def _process_batch_item(item: dict, batch: dict) -> dict:
     cfg = batch["vault"]
     ids = {item["external_id"], item["guid"]} - {None, ""}
     # Re-check right before the work: the same item may have been imported manually meanwhile
-    if ids & vault.scan_ids(cfg["scan_roots"]):
+    options = dict(batch["options"])
+    allow_duplicate = options.pop("allow_duplicate", False)
+    if not allow_duplicate and ids & vault.scan_ids(cfg["scan_roots"]):
         return {"state": "duplicate", "error": "Already in the vault.", "network": False}
 
     source = item["source"]
     request = TranscriptRequest(
         url=item["url"],
-        **batch["options"],
+        **options,
         skip_live=True,
         episode_guid=item["guid"],
         sleep_requests=BATCH_YOUTUBE_SLEEP_REQUESTS if source == "youtube" else 0,
@@ -1414,7 +1457,10 @@ async def whisper_status():
 @app.post("/whisper/start")
 async def whisper_start():
     """Start the whisper-server LaunchAgent. Idempotent."""
-    started = await asyncio.to_thread(whisper_mod.start_server)
+    try:
+        started = await asyncio.to_thread(whisper_mod.start_server)
+    except WhisperUnavailableError as e:
+        raise HTTPException(503, str(e))
     return {"available": started, "server_url": DEFAULT_SERVER_URL}
 
 

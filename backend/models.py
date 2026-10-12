@@ -53,3 +53,12 @@ class BatchRequest(BaseModel):
     folders: BatchFolders               # absolute paths, resolved by the plugin
     scan_roots: list[str]               # absolute paths searched for existing notes
     known_ids: list[str] = []           # ids the plugin already found via metadataCache
+
+
+class QueueItemRequest(BaseModel):
+    url: str
+    options: BatchOptions = BatchOptions()
+    vault_root: str
+    folders: BatchFolders
+    scan_roots: list[str]
+    allow_duplicate: bool = False

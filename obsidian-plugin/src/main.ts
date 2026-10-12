@@ -68,6 +68,7 @@ export default class YTObsidianPlugin extends Plugin {
         if (!leaf) return;
         if (!existing) await leaf.setViewState({ type: QUEUE_VIEW_TYPE, active: true });
         this.app.workspace.revealLeaf(leaf);
+        if (existing && leaf.view instanceof QueueView) await leaf.view.refresh();
     }
 
     /** Null on mobile: the backend can only write into a vault on this machine's disk. */
