@@ -2,12 +2,12 @@
 
 ## Project Overview
 
-A full-stack app that imports YouTube videos, Apple Podcasts episodes **and** web articles into Obsidian as structured notes — one URL at a time, or whole channels / playlists / podcast shows through a persistent backend batch queue. The plugin auto-detects the source from the pasted URL, fetches transcripts (RSS / YouTube CC / whisper.cpp) or the article's main text, processes them with Claude AI (summary + cleaned transcript + topics + optional resources/extended/focused summaries; articles get summary + key points + knowledge-base frontmatter instead of a transcript), and creates formatted markdown notes.
+A full-stack app that imports YouTube videos, Apple Podcasts episodes **and** web articles into Obsidian as structured notes — one URL at a time, or whole channels / playlists / podcast shows through a persistent backend batch queue. The plugin auto-detects the source from the pasted URL, fetches transcripts (RSS / YouTube CC / whisper.cpp) or the article's main text, processes them with the selected AI provider (summary + cleaned transcript + topics + optional resources/extended/focused summaries; articles get summary + key points + knowledge-base frontmatter instead of a transcript), and creates formatted markdown notes.
 
 - **Frontend:** TypeScript Obsidian plugin (`obsidian-plugin/`)
 - **Backend:** Python FastAPI with SSE streaming (`backend/`)
 - **Deployment:** macOS LaunchAgents (uvicorn + whisper-server, managed via `backend/scripts/`)
-- **AI:** Anthropic Claude API (Haiku 4.5 / Sonnet 5 / Opus 5.5; effort `low` for base, `medium` for extended/focus)
+- **AI:** Anthropic Claude API (Haiku 5.5 / Sonnet 5.5 / Opus 5.5 / Fable 5.1; effort `low` for base, `medium` for extended/focus); optional OpenRouter (DeepSeek V4.1 Flash default, Qwen3.5 Flash, Gemini 3.1 Flash Lite preview)
 - **Local STT:** whisper.cpp via local HTTP server (Apple Silicon, Metal-accelerated)
 
 ## Code Style
@@ -32,6 +32,7 @@ Each file has a single responsibility. Do not merge concerns across modules.
 | `whisper.py` | Local whisper-server HTTP client. Downloads audio → POSTs to `whisper-server` → returns transcript | — |
 | `web.py` | Web article fetch (HTML only — no images/scripts/linked pages), accessibility checks, main-text + metadata extraction via `trafilatura`, URL cleaning | — |
 | `claude.py` | Claude API streaming, response parsing, model constants | — |
+| `openrouter.py` | Curated cloud model catalog, pricing, OpenRouter streaming with progress/done contract; `openrouter:` model IDs, reasoning disabled, cheapest compatible provider | — |
 | `local_llm.py` | Optional local LLM via an OpenAI-compatible server (`LOCAL_LLM_URL`, default MLX Core on `:11234`): `list_models()` (served models + installed ones under `LOCAL_LLM_MODELS_DIR`, each with a `status`), `stream_local()` with the same yield contract as `stream_claude()`. Model ids are prefixed `local:` | — |
 | `note.py` | Source-agnostic Obsidian markdown note assembly (YouTube + podcast variants, separate web article layout) | — |
 | `cookies.py` | Cookie file persistence (save/delete/check) | — |
@@ -46,7 +47,7 @@ Each file has a single responsibility. Do not merge concerns across modules.
 | `prompts/resources.py` | Resources prompt: extract products/tools/services as wiki-link stubs | — |
 
 **Rules:**
-- `youtube.py`, `podcast.py`, `whisper.py`, `web.py`, `claude.py`, `local_llm.py`, `note.py`, `cookies.py`, `vault.py` and `batch_queue.py` must NOT import from each other. They are independent modules orchestrated only by `main.py`.
+- `youtube.py`, `podcast.py`, `whisper.py`, `web.py`, `claude.py`, `openrouter.py`, `local_llm.py`, `note.py`, `cookies.py`, `vault.py` and `batch_queue.py` must NOT import from each other. They are independent modules orchestrated only by `main.py`.
 - `models.py` contains only Pydantic models — no logic.
 - Prompt modules expose only `ROLE_PREAMBLE`, `JSON_KEYS`, and `RULES` — no functions.
 - The prompt composer (`prompts.get_system_prompt`) takes a `source` argument (`"youtube"`, `"podcast"` or `"web"`) so the same feature flags work for all sources — the wording adapts. For `"web"` it swaps `base` for `article`.
@@ -102,7 +103,7 @@ The `/process` endpoint runs a 4-step SSE streaming pipeline. Steps 1–2 differ
 ### YouTube pipeline
 1. **Metadata** — `youtube.get_video_metadata()` via yt-dlp
 2. **Transcript** — `youtube.get_transcript()` via youtube-transcript-api, falls back to yt-dlp
-3. **Claude** — `claude.stream_claude()` with `prompts.get_system_prompt(features, source="youtube")`
+3. **AI** — `main._stream_llm()` with `prompts.get_system_prompt(features, source="youtube")`
 4. **Note** — `note.build_obsidian_note()` assembles the final markdown
 
 ### Import queue (single videos/episodes, channels, playlists, podcast shows)
@@ -116,7 +117,7 @@ Single video/episode imports use `POST /queue`, close the modal immediately, and
 ### Web article pipeline
 1. **Fetch** — `web.fetch_article()` GETs the HTML document only (Safari UA, redirects followed, 20 s timeout, 5 MB cap). Clear errors for 401/403/404/429, non-HTML content types and unreachable hosts.
 2. **Extract** — `trafilatura` keeps the main text only (no comments/images/links/formatting). Fewer than `MIN_WORDS` words → error (paywall / login wall / JS-rendered). Text is capped at `MAX_TEXT_CHARS`. Metadata: title, authors, site, date, description, language, word count, reading time, accessed date.
-3. **Claude** — `source="web"`; never chunked (output is small). Default model is Haiku.
+3. **AI** — `source="web"`; never chunked (output is small). Default model is Haiku.
 **Manual paste fallback:** when `fetch_article()` raises a `WebFetchError` with `manual_ok=True` (everything except 404 / non-HTML), the backend emits `web_blocked` instead of `error`. The modal then shows a paste box and re-POSTs with `manual_text`. `web.pasted_article()` runs a rule-based cleanup (`clean_pasted_text`: chrome lines, counts, duplicates), the `pasted` prompt feature returns title/authors/date + body boundaries, and `web.trim_to_body()` recomputes the word count from the article body only.
 
 4. **Note** — `note._build_web_note()`; frontmatter includes `source` (the cleaned URL), `author`, `site`, `published`, `accessed`, `content_type`, `description` (tldr), `useful_for`, `topics`.
@@ -131,7 +132,7 @@ Single video/episode imports use `POST /queue`, close the modal immediately, and
 2. **Transcript**:
    - First tries `podcast:transcript` (Podcasting 2.0 tag) → `text/plain` / `text/vtt` / `application/srt` / `application/json` parsers
    - On miss, downloads audio enclosure to a tempfile and POSTs it to `http://127.0.0.1:2022/inference` (whisper.cpp `whisper-server`). On whisper-unreachable, returns a clear error pointing at `backend/scripts/whisper-setup.sh`.
-3. **Claude** — same as YouTube but `source="podcast"` (the prompt swaps "video"→"episode", "channel"→"show")
+3. **AI** — same as YouTube but `source="podcast"` (the prompt swaps "video"→"episode", "channel"→"show")
 4. **Note** — same `build_obsidian_note()`; `note._adapt_metadata()` switches the frontmatter/header layout based on `metadata["source"]`.
 
 Each step emits SSE events (`stage`, `message`, extras) so the frontend can show real-time progress.
@@ -223,7 +224,7 @@ The `deploy` script reads `OBSIDIAN_PLUGINS_PATH` from `obsidian-plugin/.env` an
 
 Both `.env` files are gitignored. Copy the `.env.example` templates on first setup.
 
-- `backend/.env`: `ANTHROPIC_API_KEY` — required for Claude API. `LOCAL_LLM_URL` — optional, OpenAI-compatible local server (default `http://127.0.0.1:11234`). `LOCAL_LLM_MODELS_DIR` — installed models (`<org>/<model>`, default `~/.mlx-serve/models`). `LOCAL_LLM_MAX_CONTEXT` — optional cap (tokens) on the context window reported for served local models. Servers often report the model's theoretical window (e.g. 128k for Gemma) while practical RAM or KV-cache settings make a much smaller one necessary — set this to the true available context (e.g. 8192 for a small-context Gemma). The LaunchAgent must be restarted (`stop.sh` + `start.sh`) after changes.
+- `backend/.env`: `ANTHROPIC_API_KEY` — required only for Claude API. `OPENROUTER_API_KEY` — required only for OpenRouter. Both clients validate keys at request time so either provider works independently. Plugin settings select the provider and curated OpenRouter model; requests and queued options snapshot both model fields (never keys). `LOCAL_LLM_URL` — optional, OpenAI-compatible local server (default `http://127.0.0.1:11234`). `LOCAL_LLM_MODELS_DIR` — installed models (`<org>/<model>`, default `~/.mlx-serve/models`). `LOCAL_LLM_MAX_CONTEXT` — optional cap (tokens) on the context window reported for served local models. Servers often report the model's theoretical window (e.g. 128k for Gemma) while practical RAM or KV-cache settings make a much smaller one necessary — set this to the true available context (e.g. 8192 for a small-context Gemma). The LaunchAgent must be restarted (`stop.sh` + `start.sh`) after changes.
 - `obsidian-plugin/.env`: `OBSIDIAN_PLUGINS_PATH` — primary vault deploy target. Additional vaults can be added as `OBSIDIAN_PLUGINS_PATH_2`, `_3`, etc. — `deploy.sh` picks up all matching variables automatically.
 
 ## SSE Event Protocol
@@ -266,5 +267,7 @@ Podcasts don't need cookies — RSS feeds are public.
 - The ribbon icon is a bundled SVG registered with `addIcon()` — don't switch it back to a Lucide id; renamed Lucide ids render as an invisible (but clickable) ribbon button.
 - Apple Podcasts episode resolution: do NOT compare the `?i=` value directly with the RSS `guid` or `itunes:episode` — those are different namespaces. Single imports use the redirect-based slug match in `podcast.resolve_canonical_slug()`; batch mode bridges the two via the iTunes episode lookup (`trackId` → `episodeGuid`) and `resolve_episode_by_guid()`.
 - Frontmatter id keys (`youtube_id`, `apple_episode_id`, `episode_guid`) drive duplicate detection in the plugin and in `vault.scan_ids()`. Legacy notes without them are matched by parsing ids out of `url:` — keep both parsers in sync.
-- Local models: `main._stream_llm()` / `_resolve_llm()` dispatch `local:<id>` to `local_llm`, everything else to Claude. Local models cost $0, are chunked adaptively (`main._chunk_plan()`: chunk only when a single shot would not fit `local_llm.context_length()`, chunk size from `local_llm.input_budget_chars()`; `include_transcript=false` uses a notes-only chunk prompt and bigger chunks; a chunk that hits `LocalOutputLimitError` is split in half, max 2 levels; the per-chunk notes are then condensed by `_local_reduce_notes()` — grouped, reduced, repeated until they fit the final summary call, max 6 rounds, resources merged in Python across chunks). This chunking works in base mode AND for extended / focus summaries: per-chunk extended sections are reduced to an editorial narrative; per-chunk focus-relevant notes are reduced to a focused summary. Both use the same map-reduce machinery. `stream_local()` refuses input that exceeds the model's `context_length`. mlx-serve silently answers with the *loaded* model for any unknown name, so `stream_local()` refuses models the server doesn't list — keep that guard.
-- Claude calls: `claude.resolve_model()` maps old plugin model ids to the current ones. Thinking is on by default for Sonnet 5 / Opus 5.5; `stream_claude()` appends only `text_delta`s and passes `output_config.effort` (never on Haiku). `stop_reason == "refusal"` becomes an SSE `error`.
+- Local models: `main._stream_llm()` / `_resolve_llm()` dispatch `local:<id>` to `local_llm`, `openrouter:<id>` to `openrouter`, and Claude IDs to `claude`. Local models cost $0, are chunked adaptively (`main._chunk_plan()`: chunk only when a single shot would not fit `local_llm.context_length()`, chunk size from `local_llm.input_budget_chars()`; `include_transcript=false` uses a notes-only chunk prompt and bigger chunks; a chunk that hits `LocalOutputLimitError` is split in half, max 2 levels; the per-chunk notes are then condensed by `_local_reduce_notes()` — grouped, reduced, repeated until they fit the final summary call, max 6 rounds, resources merged in Python across chunks). This chunking works in base mode AND for extended / focus summaries: per-chunk extended sections are reduced to an editorial narrative; per-chunk focus-relevant notes are reduced to a focused summary. Both use the same map-reduce machinery. `stream_local()` refuses input that exceeds the model's `context_length`. mlx-serve silently answers with the *loaded* model for any unknown name, so `stream_local()` refuses models the server doesn't list — keep that guard.
+- Claude calls: `claude.resolve_model()` maps old plugin model ids to the current ones. Thinking is adaptive on current Claude models; `stream_claude()` appends only `text_delta`s and passes `output_config.effort` (including Haiku 5.5). `stop_reason == "refusal"` becomes an SSE `error`.
+
+- OpenRouter calls route through `main._resolve_llm` / `_stream_llm`; unsupported prefixed IDs fail rather than fall back to paid Claude. Cost previews use conservative catalog rates; completed cloud calls use reported costs when supplied. Basic cloud transcripts over 180k chars are chunked; summary/focus modes remain single-shot.

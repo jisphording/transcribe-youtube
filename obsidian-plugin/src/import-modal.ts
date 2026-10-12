@@ -5,9 +5,7 @@ import { processSSEStream, ManualPasteRequiredError } from "./sse-handler";
 import { BatchPanel } from "./batch-panel";
 import { enqueueItem, BatchOptions } from "./batch-api";
 
-const MODEL_HAIKU = "claude-haiku-4-5";
-const MODEL_SONNET = "claude-sonnet-5";
-const MODEL_OPUS = "claude-opus-5-5";
+import { MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, CLAUDE_MODELS, OPENROUTER_MODELS, DEFAULT_OPENROUTER_MODEL } from "./llm-models";
 
 export class YouTubeImportModal extends Modal {
     plugin: YTObsidianPlugin;
@@ -132,6 +130,7 @@ export class YouTubeImportModal extends Modal {
                     b.style.color = isActive ? "var(--text-on-accent)" : "var(--text-normal)";
                 });
                 this.focusTopicWrapper.style.display = value === "focus_topic" ? "block" : "none";
+                if (this.plugin.settings.llmProvider === "openrouter") return;
                 if (value === "transcript") {
                     this.modelSelect.value = MODEL_HAIKU;
                 } else {
@@ -166,6 +165,7 @@ export class YouTubeImportModal extends Modal {
         this.focusIncludeExtendedCheckbox.id = "yt-focus-include-extended";
         this.focusIncludeExtendedCheckbox.checked = false;
         this.focusIncludeExtendedCheckbox.addEventListener("change", () => {
+            if (this.plugin.settings.llmProvider === "openrouter") return;
             if (this.focusIncludeExtendedCheckbox.checked) {
                 this.modelSelect.value = MODEL_OPUS;
             } else {
@@ -174,7 +174,7 @@ export class YouTubeImportModal extends Modal {
         });
 
         const focusExtendedLabel = focusExtendedRow.createEl("label", {
-            text: "Also include extended summary (Opus)",
+            text: "Also include extended summary",
             attr: { for: "yt-focus-include-extended" },
         });
         focusExtendedLabel.style.fontSize = "13px";
@@ -193,10 +193,21 @@ export class YouTubeImportModal extends Modal {
         this.modelSelect = modelWrapper.createEl("select", {
             cls: "dropdown",
         });
-        this.modelSelect.createEl("option", { text: "Haiku (fastest, cheapest)", value: MODEL_HAIKU });
-        this.modelSelect.createEl("option", { text: "Sonnet (balanced)", value: MODEL_SONNET });
-        this.modelSelect.createEl("option", { text: "Opus (highest quality)", value: MODEL_OPUS });
-        this.modelSelect.value = MODEL_HAIKU;
+        const useOpenRouter = this.plugin.settings.llmProvider === "openrouter";
+        const models = useOpenRouter ? OPENROUTER_MODELS : CLAUDE_MODELS;
+        for (const [value, text] of Object.entries(models)) {
+            this.modelSelect.createEl("option", { text, value });
+        }
+        this.modelSelect.value = useOpenRouter
+            ? (this.plugin.settings.openrouterModel in OPENROUTER_MODELS
+                ? this.plugin.settings.openrouterModel : DEFAULT_OPENROUTER_MODEL)
+            : MODEL_HAIKU;
+        this.modelSelect.addEventListener("change", async () => {
+            if (useOpenRouter) {
+                this.plugin.settings.openrouterModel = this.modelSelect.value;
+                await this.plugin.saveSettings();
+            }
+        });
 
         // Local models (OpenAI-compatible server behind the backend) — shown only when available
         this.localModelWrapper = modelWrapper.createDiv();
@@ -572,7 +583,7 @@ export class YouTubeImportModal extends Modal {
         }
         const wanted = this.localModelSelect.value || this.plugin.settings.localModel;
         this.localModelSelect.empty();
-        this.localModelSelect.createEl("option", { text: "— off (use Claude) —", value: "" });
+        this.localModelSelect.createEl("option", { text: "— off (use cloud provider) —", value: "" });
         for (const m of models) {
             const opt = this.localModelSelect.createEl("option", { text: m.name + suffix[m.status], value: m.id });
             opt.disabled = m.status === "switch" || m.status === "offline";
@@ -592,22 +603,17 @@ export class YouTubeImportModal extends Modal {
         if (this.importMode === "extended_summary") {
             opts.extended_summary = true;
             opts.include_transcript = false;
-            opts.extended_model = this.modelSelect.value;
         } else if (this.importMode === "focus_topic") {
             opts.focus_topic = this.focusTopicInput.value.trim();
             opts.include_transcript = false;
-            opts.extended_model = this.modelSelect.value;
             if (this.focusIncludeExtendedCheckbox.checked) {
                 opts.focus_include_extended = true;
             }
-        } else {
-            opts.model = this.modelSelect.value;
         }
-        const local = this.localModelSelect.value;
-        if (local) {
-            if (opts.extended_model) opts.extended_model = local;
-            else opts.model = local;
-        }
+        // Snapshot both fields so every output mode uses the chosen provider.
+        const selected = this.localModelSelect.value || this.modelSelect.value;
+        opts.model = selected;
+        opts.extended_model = selected;
         if (this.extractResourcesCheckbox.checked) {
             opts.extract_resources = true;
         }

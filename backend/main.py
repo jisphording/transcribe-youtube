@@ -18,7 +18,8 @@ from web import is_web_url, fetch_article, pasted_article, trim_to_body, set_wor
 import whisper as whisper_mod
 from whisper import transcribe_url as whisper_transcribe, WhisperUnavailableError, DEFAULT_SERVER_URL
 from note import build_obsidian_note
-from claude import stream_claude, parse_claude_response, resolve_model, DEFAULT_MODEL, DEFAULT_EXTENDED_MODEL, HAIKU, SONNET, OPUS
+from claude import stream_claude, parse_claude_response, resolve_model, DEFAULT_MODEL, DEFAULT_EXTENDED_MODEL, HAIKU, SONNET, OPUS, FABLE
+import openrouter
 import local_llm
 from cookies import has_cookies, save_cookies, delete_cookies
 import vault
@@ -83,9 +84,9 @@ app.add_middleware(
 )
 
 
-# Chunked transcript processing (used when transcript exceeds Haiku's output limit)
+# Chunked transcript processing for long cloud transcripts
 _CHUNK_CHARS = 20_000
-_CHUNK_THRESHOLD_CHARS = 25_000
+_CHUNK_THRESHOLD_CHARS = 180_000
 
 _CHUNK_CLEAN_SYSTEM = """You are a transcript editor.
 You will receive a segment of a raw transcript. Clean it and return a JSON object with exactly 2 keys:
@@ -350,7 +351,7 @@ def _chunk_plan(
     if use_extended_model and not local_llm.is_local(model):
         return False, 0
     if not local_llm.is_local(model):
-        return model == HAIKU and transcript_chars > _CHUNK_THRESHOLD_CHARS, _CHUNK_CHARS
+        return transcript_chars > _CHUNK_THRESHOLD_CHARS, _CHUNK_CHARS
     ctx = local_llm.context_length(model) or local_llm.DEFAULT_CONTEXT
     per_token = local_llm.CHARS_PER_TOKEN_SAFE
     # single-shot always returns the full transcript, so expected output ≈ input
@@ -453,34 +454,48 @@ def _sse_event(stage: str, message: str, **extra) -> str:
 
 # Pricing per million tokens (USD)
 MODEL_PRICING = {
-    HAIKU:  {"input": 1.00, "output": 5.00},
+    HAIKU:  {"input": 0.10, "output": 0.50},
     SONNET: {"input": 2.00, "output": 10.00},
     OPUS:   {"input": 4.00, "output": 20.00},
+    FABLE:  {"input": 10.00, "output": 50.00},
 }
 
-REFUSAL_MESSAGE = "Claude declined to process this content (safety refusal)."
+REFUSAL_MESSAGE = "The selected model declined to process this content (safety refusal)."
 
 
 def _resolve_llm(model: str | None, default: str) -> str:
+    if openrouter.is_openrouter(model):
+        openrouter.model_info(model)
+        return model
     return model if local_llm.is_local(model) else resolve_model(model, default)
 
 
 def _llm_label(model: str) -> str:
     if local_llm.is_local(model):
         return local_llm.model_id(model)
-    return f"Claude {model.split('-')[1].capitalize()}"
+    if openrouter.is_openrouter(model):
+        return f"{openrouter.model_info(model)['name']} (OpenRouter)"
+    return f"Claude {model.split('-')[1].capitalize()} {'.'.join(model.split('-')[2:])}"
 
 
 def _stream_llm(model: str, system_prompt: str, user_message: str, effort: str | None):
     if local_llm.is_local(model):
         return local_llm.stream_local(model, system_prompt, user_message)
+    if openrouter.is_openrouter(model):
+        return openrouter.stream_openrouter(model, system_prompt, user_message)
     return stream_claude(model, system_prompt, user_message, effort)
 
 
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     if local_llm.is_local(model):
         return 0.0
-    pricing = MODEL_PRICING[resolve_model(model, DEFAULT_MODEL)]
+    if openrouter.is_openrouter(model):
+        pricing = openrouter.model_info(model)
+    else:
+        resolved = resolve_model(model, DEFAULT_MODEL)
+        pricing = MODEL_PRICING[resolved]
+        if resolved == HAIKU and input_tokens > 100_000:
+            pricing = {"input": 0.50, "output": 2.50}
     return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
 
 
@@ -832,6 +847,7 @@ def _run_claude_and_note(
         cleaned_sections: list[str] = []
         total_in_tokens = 0
         total_out_tokens = 0
+        cloud_cost = 0.0
         chunk_start_time = time.time()
 
         local_sections: list[dict] = []
@@ -867,6 +883,7 @@ def _run_claude_and_note(
                         raw_chunk = update["response"]
                         total_in_tokens += update["input_tokens"]
                         total_out_tokens += update["output_tokens"]
+                        cloud_cost += update.get("cost_usd") if update.get("cost_usd") is not None else _estimate_cost(model, update["input_tokens"], update["output_tokens"])
             except Exception as e:
                 yield _sse_event("error", f"{_llm_label(model)} error on chunk {i + 1}: {e}")
                 return
@@ -927,12 +944,13 @@ def _run_claude_and_note(
                     summary_raw = update["response"]
                     total_in_tokens += update["input_tokens"]
                     total_out_tokens += update["output_tokens"]
+                    cloud_cost += update.get("cost_usd") if update.get("cost_usd") is not None else _estimate_cost(model, update["input_tokens"], update["output_tokens"])
         except Exception as e:
             yield _sse_event("error", f"{_llm_label(model)} error on summary: {e}")
             return
 
         elapsed_total = time.time() - chunk_start_time
-        cost = _estimate_cost(model, total_in_tokens, total_out_tokens)
+        cost = 0.0 if is_local else cloud_cost
         yield _sse_event(
             "claude_done",
             f"Step 3/{total_steps} — {_llm_label(model)} done! {_fmt_tokens(total_in_tokens)} in → {_fmt_tokens(total_out_tokens)} out ({_fmt_elapsed(elapsed_total)}, {total_out_tokens / max(elapsed_total, 0.1):.0f} tok/s)",
@@ -1085,7 +1103,9 @@ Please process this transcript according to the instructions."""
                     elapsed = _fmt_elapsed(update["elapsed"])
                     in_tok = _fmt_tokens(update["input_tokens"])
                     out_tok = _fmt_tokens(update["output_tokens"])
-                    cost = _estimate_cost(model, update["input_tokens"], update["output_tokens"])
+                    cost = update.get("cost_usd")
+                    if cost is None:
+                        cost = _estimate_cost(model, update["input_tokens"], update["output_tokens"])
                     yield _sse_event(
                         "claude_done",
                         f"Step 3/{total_steps} — {_llm_label(model)} done! {in_tok} in → {out_tok} out ({elapsed}, {update['output_tokens'] / max(update['elapsed'], 0.1):.0f} tok/s)",
@@ -1100,7 +1120,7 @@ Please process this transcript according to the instructions."""
             return
 
         if raw_response is None:
-            yield _sse_event("error", "Claude stream ended without a response.")
+            yield _sse_event("error", "The model stream ended without a response.")
             return
 
         try:
@@ -1166,7 +1186,7 @@ EST_CHARS_PER_MINUTE = 830
 EST_SYSTEM_TOKENS = 2_000
 EST_SUMMARY_OUTPUT_TOKENS = 3_000
 EST_CHUNK_OVERHEAD_TOKENS = 600  # per chunk: system prompt + heading/JSON wrapper
-EST_THINKING_HEADROOM = 1.2      # Sonnet 5 / Opus 5.5 bill thinking as output
+EST_THINKING_HEADROOM = 1.2      # Claude adaptive thinking is billed as output
 EST_SPREAD = 0.3
 
 
@@ -1188,11 +1208,11 @@ def _estimate_item_cost(duration_s: int, opts: BatchOptions) -> float:
     chars = minutes * EST_CHARS_PER_MINUTE
     if local_llm.is_local(model):
         return 0.0
-    if model == HAIKU and not use_extended and chars > _CHUNK_THRESHOLD_CHARS:
+    if not use_extended and chars > _CHUNK_THRESHOLD_CHARS:
         n_chunks = math.ceil(chars / _CHUNK_CHARS)
         inp += n_chunks * EST_CHUNK_OVERHEAD_TOKENS + min(transcript, 10_000)  # + summary call
         out += n_chunks * 50
-    if model != HAIKU:
+    if not openrouter.is_openrouter(model):
         out *= EST_THINKING_HEADROOM
     return _estimate_cost(model, int(inp), int(out))
 

@@ -6,27 +6,29 @@ from typing import Generator
 import anthropic
 
 
-client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-HAIKU = "claude-haiku-4-5"
-SONNET = "claude-sonnet-5"
+HAIKU = "claude-haiku-5-5"
+SONNET = "claude-sonnet-5-5"
 OPUS = "claude-opus-5-5"
+FABLE = "claude-fable-5-1"
 
-VALID_MODELS = {HAIKU, SONNET, OPUS}
+VALID_MODELS = {HAIKU, SONNET, OPUS, FABLE}
 DEFAULT_MODEL = HAIKU
 DEFAULT_EXTENDED_MODEL = SONNET
 
 # Older plugin builds still send the previous-generation ids.
 LEGACY_MODELS = {
+    "claude-haiku-4-5": HAIKU,
+    "claude-sonnet-5": SONNET,
     "claude-haiku-4-5-20251001": HAIKU,
     "claude-sonnet-4-6": SONNET,
     "claude-opus-4-7": OPUS,
 }
 
 MODEL_MAX_OUTPUT_TOKENS = {
-    HAIKU: 8192,
+    HAIKU: 128000,
     SONNET: 128000,
     OPUS: 128000,
+    FABLE: 128000,
 }
 
 
@@ -45,9 +47,13 @@ def stream_claude(
 
     Yields dicts with type="progress" containing token/timing info,
     and finally a dict with type="done" containing the full response.
-    Haiku rejects `effort`; the other models think adaptively by default.
+    Current Claude models support adaptive thinking and effort.
     """
     validated_model = resolve_model(model, DEFAULT_MODEL)
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("Set ANTHROPIC_API_KEY in backend/.env and restart the backend to use Claude.")
+    client = anthropic.Anthropic(api_key=api_key)
 
     raw_response = ""
     output_tokens = 0
@@ -56,9 +62,9 @@ def stream_claude(
     start_time = time.time()
 
     max_tokens = MODEL_MAX_OUTPUT_TOKENS.get(validated_model, 8192)
-    extra = {"output_config": {"effort": effort}} if effort and validated_model != HAIKU else {}
+    extra = {"output_config": {"effort": effort}} if effort else {}
 
-    with client.messages.stream(
+    with client, client.messages.stream(
         model=validated_model,
         max_tokens=max_tokens,
         system=system_prompt,

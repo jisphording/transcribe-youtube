@@ -1,10 +1,10 @@
 # Media to Obsidian (YouTube + Apple Podcasts)
 
-Import any YouTube video **or Apple Podcasts episode** as a clean, structured Obsidian note — complete with metadata, Claude-generated summary, optional resource extraction / focus topic / extended summary, and a cleaned transcript organized into chapters.
+Import any YouTube video **or Apple Podcasts episode** as a clean, structured Obsidian note — complete with metadata, AI-generated summary, optional resource extraction / focus topic / extended summary, and a cleaned transcript organized into chapters.
 
 ```
 YouTube URL    ─┐
-                ├─→  [native Python backend on macOS]  →  Claude API  →  Obsidian Note
+                ├─→  [native Python backend on macOS]  →  Claude / OpenRouter API  →  Obsidian Note
 Apple Podcast ─┘            │
                             └─→  podcast:transcript  →  free
                                  (RSS Podcasting 2.0)
@@ -157,7 +157,12 @@ tags:
 - **Token-lean article summaries** — only the HTML document is downloaded (no images, scripts, stylesheets or linked pages). [trafilatura](https://trafilatura.readthedocs.io) strips navigation, ads, cookie banners, comments, images and links, so Claude only sees the main text (capped at ~60k chars). Articles are summarized in Claude's own words — there is no verbatim copy of the article in the note. Paywalled, login-walled or JavaScript-only pages are detected and reported instead of producing an empty summary.
 - **Manual paste fallback for blocked sites** — when a site blocks automated access (e.g. Medium's HTTP 403), the modal asks you to paste the page text instead: open the page, ⌘A / ⌘C, then *Paste from clipboard*. Page clutter (menus, tag lists, author bio, comments, recommended articles) is stripped in two passes — a rule-based filter, then Claude recovers title / author / date and marks where the article body starts and ends. Such notes get `capture: "manual paste"` in the frontmatter.
 - **Batch import** — paste a YouTube channel, a playlist or an Apple Podcasts show URL to import the latest X items (all, if there are ≤ 20), filtered by a minimum length (default 15 min). You see the list and the estimated cost first; after you confirm, the backend works through the queue on its own — even with Obsidian closed — and writes the notes straight into your vault.
-- **Model selection** — Haiku 4.5 (fastest), Sonnet 5 (balanced), or Opus 5.5 (highest quality), picked per-import.
+- **Model selection** — Claude Haiku 5.5 (fastest), Sonnet 5.5 (balanced), Opus 5.5 (high quality), or Fable 5.1 (advanced reasoning), picked per import. Older saved Claude model IDs are upgraded automatically.
+- **OpenRouter for bulk imports** — in **Settings → Media to Obsidian → AI models**, switch **AI provider** from the default Anthropic Claude to OpenRouter. The curated model dropdown starts with **DeepSeek V4.1 Flash**, followed by **Qwen3.5 Flash** and **Gemini 3.1 Flash Lite (preview)**. The selected model applies to all output modes, articles, individual imports and batches; it remains selected when changing output modes. Choosing a provider clears the remembered local-model override; you can still explicitly choose a local model in the import modal.
+
+For OpenRouter, add `OPENROUTER_API_KEY=...` to `backend/.env` and restart the backend (`backend/scripts/stop.sh`, then `backend/scripts/start.sh`). Only the selected provider's key is required. Keys stay in the backend environment, outside plugin settings and queued jobs. Existing queued jobs retain their model snapshot. OpenRouter requests disable reasoning and prefer the cheapest compatible provider. Preview costs use catalog rates checked on October 12, 2026; DeepSeek's higher time-dependent rate is used conservatively. Completed imports use OpenRouter's reported cost when available. Prices can change; estimates exclude account fees. Use **Extended Summary** to omit the cleaned transcript and reduce output tokens.
+
+Current model references: [Anthropic models](https://platform.claude.com/docs/en/models/overview), [DeepSeek V4.1 Flash](https://openrouter.ai/deepseek/deepseek-v4.1-flash), and [OpenRouter catalog](https://openrouter.ai/api/v1/models).
 - **Extended summary** — a topic-by-topic editorial rewrite that reads like a standalone piece.
 - **Focus topic** — deep-dive summary on a specific user-supplied topic.
 - **Resource extraction** — pulls every product / tool / website / service mentioned and creates `[[wiki-link]]` stubs in your vault.
@@ -206,7 +211,7 @@ git clone <this-repo> transcribe-youtube
 cd transcribe-youtube
 
 cp backend/.env.example backend/.env
-# open backend/.env and paste your ANTHROPIC_API_KEY
+# open backend/.env and paste ANTHROPIC_API_KEY and/or OPENROUTER_API_KEY
 ```
 
 ### 3. Install the backend as a launchd agent
@@ -320,10 +325,10 @@ tail -f /tmp/whisper-server.log /tmp/whisper-server.err  # logs
 1. Paste a YouTube, Apple Podcasts or web article URL — a small badge shows the detected source (YouTube / Podcast / Article)
 2. Pick Transcript (shown as **Summary** for articles) / Extended Summary / Focus Topic mode
 3. (Podcast only) Whisper language: `auto` works in most cases; set `en`, `de`, etc. if auto-detect picks the wrong one on short clips
-4. Pick a Claude model
+4. Pick a model from your configured AI provider
 5. For videos and podcast episodes, click **Add to queue** (or press Enter). The modal closes and the **Import queue** sidebar opens immediately; you can add another URL while the current item runs. Articles use **Import** and open the resulting note automatically.
 
-Queued notes are saved automatically; click a completed item in the sidebar to open its note. Videos over ~90 minutes start getting unreliable (YouTube rate-limits, transcripts truncate); Sonnet or Opus handles long videos better than Haiku. Podcasts of any length work, but whisper transcription scales linearly with duration (~3–5 min per hour on M-series).
+Queued notes are saved automatically; click a completed item in the sidebar to open its note. Videos over ~90 minutes start getting unreliable (YouTube rate-limits, transcripts truncate); Long cleaned transcripts are split into chunks; summary-only modes use a single model request. Podcasts of any length work, but whisper transcription scales linearly with duration (~3–5 min per hour on M-series).
 
 ### Batch import (channels, playlists, podcast shows)
 
@@ -521,6 +526,7 @@ transcribe-youtube/
 │   ├── whisper.py           # Local whisper-server HTTP client (audio download + POST)
 │   ├── note.py              # Obsidian markdown assembly (YouTube + podcast variants)
 │   ├── claude.py            # Anthropic streaming client
+│   ├── openrouter.py        # Curated OpenRouter models and streaming client
 │   ├── cookies.py           # cookies.txt persistence
 │   ├── prompts/             # composable prompt modules (source-aware)
 │   ├── pyproject.toml       # deps (uv reads this)

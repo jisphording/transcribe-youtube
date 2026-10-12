@@ -5,9 +5,12 @@ import {
     Setting,
 } from "obsidian";
 import type YTObsidianPlugin from "./main";
+import { OPENROUTER_MODELS, DEFAULT_OPENROUTER_MODEL } from "./llm-models";
 
 export interface YTObsidianSettings {
     apiUrl: string;
+    llmProvider: "anthropic" | "openrouter";
+    openrouterModel: string;
     useParentFolder: boolean;       // true: folders below mediaTranscriptsFolder; false: siblings in vault root
     mediaTranscriptsFolder: string; // Parent folder (only used when useParentFolder is on)
     youtubeFolder: string;
@@ -16,13 +19,15 @@ export interface YTObsidianSettings {
     resourcesFolder: string;        // Mentioned_Resources, shared by all sources
     whisperLanguage: string;        // "auto" or ISO 639-1 ("en", "de", …)
     keepWhisperWarm: boolean;       // start whisper-server on plugin load (vs. lazy on first use)
-    localModel: string;             // last Local dropdown choice ("local:<id>"), "" = use Claude
+    localModel: string;             // last Local dropdown choice ("local:<id>"), "" = use cloud provider
 }
 
 export type FolderKey = "youtubeFolder" | "podcastFolder" | "articleFolder" | "resourcesFolder";
 
 export const DEFAULT_SETTINGS: YTObsidianSettings = {
     apiUrl: "http://127.0.0.1:8000",
+    llmProvider: "anthropic",
+    openrouterModel: DEFAULT_OPENROUTER_MODEL,
     useParentFolder: true,
     mediaTranscriptsFolder: "MEDIA_Transcripts",
     youtubeFolder: "YouTube",
@@ -59,6 +64,33 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     })
             );
+
+        containerEl.createEl("h3", { text: "AI models" });
+        new Setting(containerEl)
+            .setName("AI provider")
+            .setDesc("Used for single and bulk imports. Configure the provider's API key in backend/.env and restart the backend.")
+            .addDropdown((dropdown) => dropdown
+                .addOption("anthropic", "Anthropic Claude (default)")
+                .addOption("openrouter", "OpenRouter")
+                .setValue(this.plugin.settings.llmProvider)
+                .onChange(async (value: "anthropic" | "openrouter") => {
+                    this.plugin.settings.llmProvider = value;
+                    this.plugin.settings.localModel = "";
+                    await this.plugin.saveSettings();
+                    this.display();
+                }));
+        if (this.plugin.settings.llmProvider === "openrouter") {
+            new Setting(containerEl)
+                .setName("OpenRouter model")
+                .setDesc("DeepSeek V4.1 Flash is the default for bulk imports. Uses OPENROUTER_API_KEY from backend/.env. Reasoning is disabled to reduce cost; preview prices are estimates.")
+                .addDropdown((dropdown) => dropdown
+                    .addOptions(OPENROUTER_MODELS)
+                    .setValue(this.plugin.settings.openrouterModel)
+                    .onChange(async (value) => {
+                        this.plugin.settings.openrouterModel = value;
+                        await this.plugin.saveSettings();
+                    }));
+        }
 
         // ── Folders ──────────────────────────────────────────────────────────
         containerEl.createEl("h3", { text: "Folders" });

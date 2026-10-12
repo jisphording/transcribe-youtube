@@ -10,8 +10,8 @@ class TranscriptRequest(BaseModel):
     focus_include_extended: bool = False
     include_transcript: bool = True
     extract_resources: bool = False
-    model: str = "claude-haiku-4-5"
-    extended_model: str = "claude-sonnet-5"
+    model: str = "claude-haiku-5-5"
+    extended_model: str = "claude-sonnet-5-5"
     # Podcast-only options
     whisper_language: str | None = None  # None / "auto" / ISO 639-1 like "en", "de"
     # Web-only: page text pasted by the user when the site blocks automated access
@@ -33,8 +33,8 @@ class BatchOptions(BaseModel):
     focus_include_extended: bool = False
     include_transcript: bool = True
     extract_resources: bool = False
-    model: str = "claude-haiku-4-5"
-    extended_model: str = "claude-sonnet-5"
+    model: str = "claude-haiku-5-5"
+    extended_model: str = "claude-sonnet-5-5"
     whisper_language: str | None = None
 
 

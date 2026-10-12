@@ -10,7 +10,7 @@ from unittest.mock import patch
 import batch_queue as queue
 with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key-no-network"}):
     import main
-from models import BatchFolders, QueueItemRequest
+from models import BatchFolders, BatchOptions, QueueItemRequest
 
 
 class QueueTests(unittest.IsolatedAsyncioTestCase):
@@ -35,6 +35,29 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue.next_item(time.time())['batch_id'], first['id'])
         # History limits must never hide pending work.
         self.assertEqual([b['id'] for b in queue.list_batches(0)], [first['id'], second['id']])
+
+    async def test_openrouter_model_snapshot_survives_restart_and_reaches_worker(self):
+        model = 'openrouter:deepseek/deepseek-v4.1-flash'
+        req = QueueItemRequest(
+            url='https://www.youtube.com/watch?v=abcdefghijk',
+            options=BatchOptions(model=model, extended_model=model, extended_summary=True, include_transcript=False),
+            vault_root=str(self.root), folders=self.folders, scan_roots=[str(self.root)],
+        )
+        await main.queue_single(req)
+        queue.init_db()
+        item = queue.next_item(time.time())
+        seen = []
+        def pipeline(request, steps):
+            seen.append(request)
+            yield json.dumps({'stage': 'done', 'filename': 'router.md', 'content': 'summary', 'resources': []})
+        with patch.object(main, '_run_youtube_pipeline', pipeline):
+            result = main._process_batch_item(item, queue.get_batch(item['batch_id'], with_vault=True))
+        self.assertEqual(result['state'], 'done')
+        self.assertEqual(seen[0].model, model)
+        self.assertEqual(seen[0].extended_model, model)
+        self.assertTrue(seen[0].extended_summary)
+        self.assertFalse(seen[0].include_transcript)
+        self.assertEqual((self.root / 'YouTube/router.md').read_text(), 'summary')
 
     async def test_worker_runs_single_video_and_podcast_serially_and_writes_notes(self):
         first = await self.enqueue()

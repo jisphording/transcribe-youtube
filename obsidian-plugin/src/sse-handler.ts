@@ -77,7 +77,7 @@ export async function processSSEStream(response: Response, callbacks: SSECallbac
                     break;
                 case "web_extract_done":
                     callbacks.onProgress(step, totalSteps, `✓ ${message}`);
-                    callbacks.onDetail(`${((event.words as number) ?? 0).toLocaleString()} words, ${((event.transcript_chars as number) ?? 0).toLocaleString()} chars sent to Claude`);
+                    callbacks.onDetail(`${((event.words as number) ?? 0).toLocaleString()} words, ${((event.transcript_chars as number) ?? 0).toLocaleString()} chars sent to the selected model`);
                     break;
                 case "transcript_done":
                     callbacks.onProgress(step, totalSteps, `✓ ${message}`);
