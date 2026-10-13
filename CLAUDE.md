@@ -42,7 +42,7 @@ Each file has a single responsibility. Do not merge concerns across modules.
 | `prompts/base.py` | Base prompt: transcript cleaning + short summary + topics | — |
 | `prompts/pasted.py` | Added with `article` when the user pasted the page text by hand: recovers `title`, `authors`, `published` and the verbatim `body_first_words` / `body_last_words` so the backend can trim page clutter | — |
 | `prompts/article.py` | Base prompt for `source="web"` (replaces `base`): tldr, summary, key points, topics, content type, useful-for. No transcript key — articles are never reproduced | — |
-| `prompts/extended.py` | Extended summary prompt: topic-by-topic editorial rewrite | — |
+| `prompts/extended.py` | Extended summary prompt: topic-by-topic summary close to the speaker's wording, with exact on-topic quotes | — |
 | `prompts/focus.py` | Focus topic prompt: deep-dive on a user-supplied topic | — |
 | `prompts/resources.py` | Resources prompt: extract products/tools/services as wiki-link stubs | — |
 

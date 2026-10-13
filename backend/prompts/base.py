@@ -31,8 +31,15 @@ Rules for "topics":
 - Return as a JSON array of strings.
 
 Rules for "transcript":
-- Remove ALL filler words: "um", "uh", "like", "you know", "sort of", "kind of", "basically", "literally", "actually", "right", "okay so", "so yeah", "I mean", etc.
-- Keep the content as close to the original wording as possible — do not paraphrase or rewrite sentences.
+- Style: clean verbatim. The reader uses this transcript as a reference and as raw material to quote and learn from, so it must read as the speaker's own words, not as an edited rewrite.
+- Remove only what carries no meaning: hesitation sounds ("um", "uh", "er", "hmm"), stutters and doubled words ("the the"), false starts the speaker abandons and then restates, and verbal tics used purely as pauses ("you know", "like", "I mean", "so yeah" while searching for words).
+- Keep every word that affects meaning or tone: hedges and qualifiers ("kind of", "sort of", "I think", "probably"), emphasis ("actually", "really", "literally" when they stress a point), "like" when it compares or introduces quoted speech, self-corrections, rhetorical questions, asides, jokes, anecdotes, examples, names and numbers.
+- When the speaker states the same point several times in a row in near-identical words, keep the single most complete phrasing. Keep repetition used on purpose for emphasis, and keep a point that comes back later with new detail.
+- Keep the speaker's vocabulary, idioms and sentence rhythm. Do not paraphrase, reorder, merge or condense sentences. Fix grammar only where a spoken slip would make the sentence hard to read.
+- Examples:
+  Spoken: "So, um, I— I think it kind of works, you know, but it's actually slower." → "I think it kind of works, but it's actually slower."
+  Spoken: "And he was like, 'we're not shipping that.'" → keep unchanged.
+  Spoken: "The key thing is trust. Trust is the key thing here. It's really about trust." → "The key thing is trust. It's really about trust."
 - If there are clearly multiple speakers (e.g. interview format), format as:
   **Speaker A:** Their text here.
   **Speaker B:** Their response here.

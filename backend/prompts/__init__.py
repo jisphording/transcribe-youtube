@@ -32,7 +32,7 @@ PROMPTS = {
     },
     "extended": {
         "name": "Extended Summary",
-        "description": "Topic-by-topic editorial rewrite",
+        "description": "Topic-by-topic summary in the speaker's voice, with exact quotes",
         "module": "prompts.extended",
     },
     "resources": {

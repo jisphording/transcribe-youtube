@@ -95,8 +95,11 @@ You will receive a segment of a raw transcript. Clean it and return a JSON objec
 2. "transcript": The cleaned transcript text for this segment.
 
 Rules for "transcript":
-- Remove ALL filler words: "um", "uh", "like", "you know", "sort of", "kind of", "basically", "literally", "actually", "right", "okay so", "so yeah", "I mean", etc.
-- Keep content close to original wording — do not paraphrase or rewrite sentences.
+- Style: clean verbatim. The reader quotes and learns from this text, so it must read as the speaker's own words.
+- Remove only what carries no meaning: hesitation sounds ("um", "uh", "er"), stutters and doubled words, false starts the speaker abandons and restates, and verbal tics used purely as pauses ("you know", "like", "I mean" while searching for words).
+- Keep every word that affects meaning or tone: hedges ("kind of", "I think", "probably"), emphasis ("actually", "really", "literally" when they stress a point), "like" when it compares or introduces quoted speech, self-corrections, asides, anecdotes, examples, names and numbers.
+- When the same point is restated several times in a row in near-identical words, keep the most complete phrasing. Keep deliberate repetition for emphasis.
+- Keep the speaker's vocabulary and sentence rhythm. Do not paraphrase, reorder, merge or condense sentences.
 - Preserve paragraph breaks for readability. Group related sentences together.
 - Do NOT add any content that wasn't in the original.
 
@@ -129,7 +132,7 @@ def _build_chunk_summary_system(extract_resources: bool, source: str) -> str:
 _LOCAL_CHUNK_SYSTEM = """You are a transcript editor.
 You will receive one segment of a raw transcript. Return a JSON object with these keys:
 1. "heading": Short title (3-6 words) for the segment's topic.
-2. "transcript": The segment with filler words removed ("um", "uh", "like", "you know", "I mean", etc.). Keep the original wording, keep paragraph breaks, add nothing.
+2. "transcript": The segment in clean verbatim: remove only hesitation sounds ("um", "uh"), stutters, abandoned false starts and pause tics ("you know", "like", "I mean" while searching for words). Keep hedges, emphasis and every word that affects meaning. Keep the original wording, keep paragraph breaks, add nothing.
 3. "notes": 2-5 terse bullet sentences (one string each, in an array) with the segment's key points.
 {resources_key}{extended_key}{focus_key}
 Return ONLY the JSON object."""
