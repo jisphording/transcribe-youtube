@@ -51,27 +51,36 @@ tags:
 
 ---
 
-## Summary
-A 3–5 sentence summary of the key takeaways…
-
----
-
-## Mentioned Resources    ← (optional, when "Extract resources" is on)
-- [[Obsidian]] *(software)*
-- [[Anthropic]] *(service)*
+## Executive Summary     ← "Summary" for transcript-only imports
+A short 3–5 sentence overview of the key takeaways…
 
 ---
 
 ## Extended Summary       ← (optional, when enabled)
 ### Topic One
-Several paragraphs of synthesized editorial prose…
+Detailed abridgement in the speaker’s wording, with exact quotes…
 
 ---
 
 ## Transcript
 ### Introduction
 Cleaned transcript text without filler words, broken into chapters…
+
+---
+
+## Mentioned Resources    ← (optional, always below the main text)
+| Resource | Type | Source mention |
+| --- | --- | --- |
+| [[Obsidian]] | software | I use Obsidian for notes. |
 ```
+
+**Extended summaries** target half of the original word count (40–60%), preserving substantive examples, reasoning, caveats and verbatim passages in source order. Long audio/video transcripts are processed section by section; detailed sections are joined without further compression. A short executive summary covers all sections. Each extended result with at least 100 source words is checked for length, retried once if needed, and rejected with an actionable error if still outside the range. More detail means more output tokens and potentially longer processing; batch estimates account for the larger output. Focus mode remains available for a narrower summary.
+
+**Resources** are extracted only from the original source body, verified against a short source excerpt containing the exact name, deduplicated and displayed alphabetically at the end. The Markdown table works without additional plugins. Expand **Sort and filter resources** to use an embedded Obsidian **Bases** table with Resource, Type and Source mention columns; enable the core Bases plugin and use its sorting/filtering controls. Database rows appear after the linked resource stubs are created and indexed. The base filters to those stubs linking back to this note and keeps evidence specific to this import.
+
+These changes apply to new imports; existing notes are not rewritten.
+
+New notes also record the selected import options as flat Obsidian properties: `import_mode`, `import_selected_model`, `import_model` (the resolved model actually used), `import_extended_summary`, `import_focus_topic`, `import_focus_include_extended`, `import_include_transcript`, and `import_extract_resources`. Podcast notes additionally record `import_whisper_language` (`auto` when unspecified). Checkbox selections remain YAML booleans, including disabled options, so you can filter notes by settings in Obsidian. These settings are captured for single and queued/batch imports; fields reflect requested options, even when a source does not support a particular output (articles never include a transcript).
 
 Each mentioned resource note also keeps a `Mentioned in` list linking back to every transcript that mentions it. These links accumulate across imports and appear in Obsidian's graph view.
 

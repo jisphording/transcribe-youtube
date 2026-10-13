@@ -16,6 +16,55 @@ def _demote_headings(text: str) -> str:
     return re.sub(r"^##(?!#)", "###", text, flags=re.MULTILINE)
 
 
+def _resource_table(resources: list[dict]) -> str:
+    def cell(value: str) -> str:
+        return str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
+    rows = [
+        f"| [[{cell(r['name'])}]] | {cell(r.get('type', ''))} | {cell(r.get('mention', ''))} |"
+        for r in sorted(resources, key=lambda r: r.get("name", "").casefold()) if r.get("name")
+    ]
+    if not rows:
+        return ""
+    table = "## Mentioned Resources\n\n| Resource | Type | Source mention |\n| --- | --- | --- |\n" + "\n".join(rows)
+    return table + "\n\n" + _resource_base(resources)
+
+
+def _resource_base(resources: list[dict]) -> str:
+    # Formulas keep evidence specific to this import, even when a stub is shared by many notes.
+    def stub_name(name: str) -> str:
+        name = re.sub(r'[\\/:*?"<>|#^\[\]]', " ", name).strip().lstrip(".")
+        return re.sub(r"\s+", " ", name)[:120].lower()
+
+    entries = [r for r in resources if r.get("name")]
+    names = sorted({stub_name(r["name"]) for r in entries})
+    def formula(key: str) -> str:
+        expression = '""'
+        for resource in reversed(entries):
+            name = json.dumps(stub_name(resource["name"]), ensure_ascii=False)
+            value = json.dumps(resource.get(key, ""), ensure_ascii=False)
+            expression = f"if(file.name.lower() == {name}, {value}, {expression})"
+        return expression
+
+    # JSON-quoted scalars are valid YAML and safely contain quotes, newlines and backticks.
+    lines = [
+        "filters:", "  and:", '    - file.ext == "md"', "    - file.hasLink(this.file)",
+        "    - " + json.dumps(json.dumps(names, ensure_ascii=False) + ".contains(file.name.lower())", ensure_ascii=False),
+        "formulas:",
+        "  type: " + json.dumps(formula("type"), ensure_ascii=False),
+        "  mention: " + json.dumps(formula("mention"), ensure_ascii=False),
+        "properties:", "  file.name:", "    displayName: Resource",
+        "  formula.type:", "    displayName: Type",
+        "  formula.mention:", "    displayName: Source mention",
+        "views:", "  - type: table", "    name: Mentioned resources", "    order:",
+        "      - file.name", "      - formula.type", "      - formula.mention",
+    ]
+    block = "\n".join(["```base", *lines, "```"])
+    return "> [!example]- Sort and filter resources (enable Obsidian Bases)\n" + "\n".join(
+        "> " + line for line in block.splitlines()
+    )
+
+
 def _yt_view(metadata: dict) -> dict:
     """Adapt a YouTube metadata dict to the source-agnostic shape used below."""
     return {
@@ -66,6 +115,13 @@ def _yaml_list(key: str, values: list[str]) -> list[str]:
     return [f"{key}:"] + [f"  - {_yaml_str(v)}" for v in values]
 
 
+def _import_frontmatter(settings: dict[str, str | bool] | None) -> list[str]:
+    return [
+        f"import_{key}: {json.dumps(value, ensure_ascii=False)}"
+        for key, value in (settings or {}).items()
+    ]
+
+
 def _build_web_note(
     metadata: dict,
     summary: str,
@@ -75,6 +131,7 @@ def _build_web_note(
     topics: list[str],
     resources: list[dict],
     article_info: dict,
+    import_settings: dict[str, str | bool] | None,
 ) -> tuple[str, str]:
     title = metadata["title"]
     url = metadata["url"]
@@ -101,6 +158,7 @@ def _build_web_note(
         fm.append(f"description: {_yaml_str(tldr)}")
     fm += _yaml_list("useful_for", useful_for)
     fm += _yaml_list("topics", topics)
+    fm += _import_frontmatter(import_settings)
     fm += ["tags:", "  - article", "  - summary", "---"]
 
     header = [f"# {title}", ""]
@@ -129,14 +187,11 @@ def _build_web_note(
     if focused_summary.strip():
         heading = f"## Focus: {focus_topic}" if focus_topic else "## Focus"
         sections.append(heading + "\n\n" + _demote_headings(focused_summary.strip()))
-    resource_lines = [
-        f"- [[{r['name']}]]" + (f" *({r['type']})*" if r.get("type") else "")
-        for r in resources if r.get("name")
-    ]
-    if resource_lines:
-        sections.append("## Mentioned Resources\n\n" + "\n".join(resource_lines))
     if extended_summary.strip():
         sections.append("## Extended Summary\n\n" + _demote_headings(extended_summary.strip()))
+    resource_table = _resource_table(resources)
+    if resource_table:
+        sections.append(resource_table)
 
     note = "\n".join(fm) + "\n\n" + "\n".join(header) + "\n---\n\n" + "\n\n---\n\n".join(sections) + "\n"
     filename = (slugify(title)[:100].rstrip("-") or "article") + ".md"
@@ -155,12 +210,14 @@ def build_obsidian_note(
     resources: list[dict] | None = None,
     transcript_source_label: str = "",
     article_info: dict | None = None,
+    import_settings: dict[str, str | bool] | None = None,
 ) -> tuple[str, str]:
     """Returns (filename, markdown_content). Works for YouTube, podcast and web metadata."""
     if metadata.get("source") == "web":
         return _build_web_note(
             metadata, summary, extended_summary, focused_summary, focus_topic,
             topics or [], resources or [], article_info or {},
+            import_settings,
         )
 
     view = _adapt_metadata(metadata)
@@ -197,22 +254,14 @@ def build_obsidian_note(
             fm_lines.append(f"{key}: {_yaml_str(value)}")
     if topics_yaml:
         fm_lines.append(topics_yaml.rstrip())
+    fm_lines.extend(_import_frontmatter(import_settings))
     fm_lines.append("tags:")
     fm_lines.append(f"  - {view['tag']}")
     fm_lines.append("  - transcript")
     fm_lines.append("---")
     frontmatter = "\n".join(fm_lines) + "\n\n"
 
-    resources_section = ""
-    if resources:
-        lines = []
-        for r in resources:
-            name = r.get("name", "")
-            rtype = r.get("type", "")
-            if name:
-                lines.append(f"- [[{name}]]" + (f" *({rtype})*" if rtype else ""))
-        if lines:
-            resources_section = "## Mentioned Resources\n\n" + "\n".join(lines) + "\n\n---\n\n"
+    resources_section = _resource_table(resources or [])
 
     extended_summary_section = ""
     if extended_summary.strip():
@@ -257,13 +306,13 @@ def build_obsidian_note(
         + f"> **Duration:** {view['duration']}  \n"
         + f"> **Link:** [{view['url_label']}]({view['url']})\n\n"
         + "---\n\n"
-        + "## Summary\n\n"
+        + ("## Executive Summary\n\n" if extended_summary.strip() else "## Summary\n\n")
         + summary.strip()
         + "\n\n---\n\n"
         + focused_summary_section
-        + resources_section
         + extended_summary_section
         + transcript_section
+        + ("\n\n---\n\n" + resources_section + "\n" if resources_section else "")
     )
 
     return filename, note
