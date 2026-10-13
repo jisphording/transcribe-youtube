@@ -1,7 +1,9 @@
 import asyncio
 import json
 import math
+import re
 import time
+import unicodedata
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -26,6 +28,7 @@ from cookies import has_cookies, save_cookies, delete_cookies
 import vault
 import batch_queue
 from prompts import get_system_prompt
+from prompts.resources import RULES as RESOURCE_RULES
 
 
 WHISPER_IDLE_TIMEOUT_SECONDS = 30 * 60
@@ -86,24 +89,9 @@ app.add_middleware(
 
 
 # Chunked transcript processing for long cloud transcripts
+_EXTENDED_CHUNK_CHARS = 12_000
 _CHUNK_CHARS = 20_000
 _CHUNK_THRESHOLD_CHARS = 180_000
-
-_CHUNK_CLEAN_SYSTEM = """You are a transcript editor.
-You will receive a segment of a raw transcript. Clean it and return a JSON object with exactly 2 keys:
-1. "heading": A short, descriptive title (3-6 words) for this segment's topic.
-2. "transcript": The cleaned transcript text for this segment.
-
-Rules for "transcript":
-- Style: clean verbatim. The reader quotes and learns from this text, so it must read as the speaker's own words.
-- Remove only what carries no meaning: hesitation sounds ("um", "uh", "er"), stutters and doubled words, false starts the speaker abandons and restates, and verbal tics used purely as pauses ("you know", "like", "I mean" while searching for words).
-- Keep every word that affects meaning or tone: hedges ("kind of", "I think", "probably"), emphasis ("actually", "really", "literally" when they stress a point), "like" when it compares or introduces quoted speech, self-corrections, asides, anecdotes, examples, names and numbers.
-- When the same point is restated several times in a row in near-identical words, keep the most complete phrasing. Keep deliberate repetition for emphasis.
-- Keep the speaker's vocabulary and sentence rhythm. Do not paraphrase, reorder, merge or condense sentences.
-- Preserve paragraph breaks for readability. Group related sentences together.
-- Do NOT add any content that wasn't in the original.
-
-Return ONLY the JSON object, no other text."""
 
 _CHUNK_SUMMARY_SYSTEM_BASE = """You are a transcript summarizer.
 You will receive the cleaned transcript of a {kind} along with its title and {source_attr}.
@@ -120,7 +108,7 @@ def _build_chunk_summary_system(extract_resources: bool, source: str) -> str:
     else:
         kind, noun, source_attr = "YouTube video", "video", "channel"
     if extract_resources:
-        resources_key = '3. "resources": A JSON array of objects (each with "name" and "type") for every product, software, website, service, tool, or platform mentioned by name. Deduplicate. Return [] if none.'
+        resources_key = '3. "resources": An array with "name", "type", and "mention" (a short verbatim source excerpt containing the name). Explicit source mentions only; do not infer names. Deduplicate. Return [] if none.'
         return _CHUNK_SUMMARY_SYSTEM_BASE.format(
             kind=kind, noun=noun, source_attr=source_attr, key_count=3, resources_key=resources_key,
         )
@@ -144,8 +132,8 @@ You will receive one segment of a raw transcript. Return a JSON object with thes
 {resources_key}{extended_key}{focus_key}
 Return ONLY the JSON object."""
 
-_LOCAL_RESOURCES_KEY = '{n}. "resources": Array of objects with "name" and "type" for every product, software, website, service, tool or platform named in the segment. [] if none.'
-_LOCAL_EXTENDED_KEY = '{n}. "extended": 1-2 sentences explaining the segment\'s theme and key context (for topic-by-topic summary).'
+_LOCAL_RESOURCES_KEY = '{n}. "resources": Array of objects with "name", "type" and "mention" (a short exact source excerpt containing the name). Only resources explicitly named in this original segment; never infer or add names from metadata or outside knowledge. [] if none.'
+_LOCAL_EXTENDED_KEY = '{n}. "extended": A detailed abridgement at approximately 50% of this original segment word count (40-60%). Preserve all substantive ideas, examples, reasoning, caveats, names and numbers in order, using substantial verbatim passages and the speaker\'s wording. Remove repetition and filler, not distinct content. Use paragraphs and exact quotes. Do not add outside knowledge.'
 _LOCAL_FOCUS_KEY = '{n}. "focus_notes": 1-3 terse bullet sentences if the segment relates to the focus topic, otherwise empty array.'
 _LOCAL_OVERHEAD_CHARS = 600
 _LOCAL_SPLIT_DEPTH = 2
@@ -159,21 +147,18 @@ def _local_chunk_system(notes_only: bool, extract_resources: bool, include_exten
     extended_str = _LOCAL_EXTENDED_KEY.format(n=n) if include_extended else ""
     n += 1 if include_extended else 0
     focus_str = _LOCAL_FOCUS_KEY.format(n=n) if include_focus else ""
-    return template.format(
+    result = template.format(
         resources_key="\n" + resources_str if resources_str else "",
         extended_key="\n" + extended_str if extended_str else "",
         focus_key="\n" + focus_str if focus_str else "",
     )
 
+    return result + ("\n" + RESOURCE_RULES if extract_resources else "")
+
 
 _LOCAL_REDUCE_SYSTEM = """You are a note condenser.
 You will receive consecutive segment notes of a {kind}. Merge them into fewer, shorter notes that keep every distinct key point, name and number.
 Return a JSON object with one key: "notes": an array of terse bullet sentences (one string each), about half as many as the input.
-Return ONLY the JSON object."""
-
-_LOCAL_REDUCE_EXTENDED_SYSTEM = """You are a summary editor.
-You will receive consecutive topic-by-topic sections from a {kind}. Merge the thematic context into a shorter editorial narrative (1-2 paragraphs) that keeps every theme and distinct idea.
-Return a JSON object with one key: "extended": the merged narrative.
 Return ONLY the JSON object."""
 
 _LOCAL_REDUCE_FOCUS_SYSTEM = """You are a note condenser (focus mode).
@@ -248,53 +233,6 @@ def _local_reduce_notes(
     return joined
 
 
-def _local_reduce_extended(
-    model: str, source: str, title: str, units: list[str], final_chars: int,
-    stats: dict, stage_label: str, total_steps: int,
-):
-    """Condense extended sections until they fit final_chars. Yields SSE events, returns the merged text."""
-    kind = "podcast episode" if source == "podcast" else "YouTube video"
-    system = _LOCAL_REDUCE_EXTENDED_SYSTEM.format(kind=kind)
-    group_chars = local_llm.input_budget_chars(model, len(system) + _LOCAL_OVERHEAD_CHARS, _LOCAL_REDUCE_RATIO)
-    for round_no in range(1, _LOCAL_REDUCE_MAX_ROUNDS + 1):
-        joined = "\n\n".join(units)
-        if len(joined) <= final_chars:
-            return joined
-        pieces = [p for u in units for p in _split_transcript(u, group_chars)]
-        groups = _group_units(pieces, group_chars)
-        yield _sse_event(
-            stage_label,
-            f"Step 3/{total_steps} — Condensing extended sections — round {round_no}, {len(groups)} groups…",
-            step=3, total_steps=total_steps,
-        )
-        reduced: list[str] = []
-        for i, group in enumerate(groups):
-            user = (
-                f"{_title_label(source)}: {title} (extended group {i + 1}/{len(groups)})\n\n"
-                "--- SECTIONS ---\n" + "\n\n".join(group) + "\n--- END SECTIONS ---"
-            )
-            raw = None
-            try:
-                for update in local_llm.stream_local(model, system, user):
-                    if update["type"] == "done":
-                        raw = update["response"]
-                        stats["in"] += update["input_tokens"]
-                        stats["out"] += update["output_tokens"]
-                extended = parse_claude_response(raw or "").get("extended", "")
-            except Exception as e:
-                raise RuntimeError(f"extended condensing (round {round_no}, group {i + 1}): {e}")
-            if not str(extended).strip():
-                raise RuntimeError(f"extended condensing (round {round_no}, group {i + 1}): empty result")
-            reduced.append(str(extended).strip())
-        if sum(map(len, reduced)) >= len(joined):
-            raise RuntimeError(f"extended condensing (round {round_no}): output did not shrink")
-        units = reduced
-    joined = "\n\n".join(units)
-    if len(joined) > final_chars:
-        raise RuntimeError(f"extended still too long after {_LOCAL_REDUCE_MAX_ROUNDS} condensing rounds")
-    return joined
-
-
 def _local_reduce_focus_notes(
     model: str, source: str, title: str, units: list[str], final_chars: int,
     stats: dict, stage_label: str, total_steps: int,
@@ -345,6 +283,46 @@ def _local_reduce_focus_notes(
     return joined
 
 
+def _extended_word_target(text: str) -> str:
+    words = len(text.split())
+    return (
+        f"\nExtended summary length: source has {words:,} words. "
+        f"Target {round(words * 0.5):,} words (acceptable range {round(words * 0.4):,}–{round(words * 0.6):,}). "
+        "Keep detail from the entire source, including the ending."
+    )
+
+
+def _normalise_evidence(text: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
+
+
+def _verified_resources(resources: list[dict], source_text: str) -> list[dict]:
+    """Reject inferred names and unverifiable evidence before notes and stubs are written."""
+    source = _normalise_evidence(source_text)
+    verified = {}
+    types = {"product", "software", "website", "service", "tool", "platform"}
+    for resource in resources if isinstance(resources, list) else []:
+        if not isinstance(resource, dict):
+            continue
+        name = resource.get("name")
+        mention = resource.get("mention")
+        if not isinstance(name, str) or not isinstance(mention, str):
+            continue
+        name, mention = name.strip(), mention.strip()
+        key, excerpt = _normalise_evidence(name), _normalise_evidence(mention)
+        if not key or not excerpt or excerpt not in source:
+            continue
+        if not re.search(r"(?<!\w)" + re.escape(key) + r"(?!\w)", excerpt):
+            continue
+        if any(c in name for c in "[]|\n\r"):
+            continue
+        rtype = resource.get("type")
+        if rtype not in types:
+            continue
+        verified.setdefault(key, {"name": name, "type": rtype, "mention": mention})
+    return [verified[key] for key in sorted(verified)]
+
+
 def _chunk_plan(
     model: str, source: str, use_extended_model: bool, transcript_chars: int,
     system_chars: int, chunk_system_chars: int, notes_only: bool,
@@ -353,18 +331,19 @@ def _chunk_plan(
     if source == "web":
         return False, 0
     if use_extended_model and not local_llm.is_local(model):
-        return False, 0
+        return transcript_chars > _EXTENDED_CHUNK_CHARS, _EXTENDED_CHUNK_CHARS
     if not local_llm.is_local(model):
         return transcript_chars > _CHUNK_THRESHOLD_CHARS, _CHUNK_CHARS
     ctx = local_llm.context_length(model) or local_llm.DEFAULT_CONTEXT
     per_token = local_llm.CHARS_PER_TOKEN_SAFE
-    # single-shot always returns the full transcript, so expected output ≈ input
+    # Reserve space for both a cleaned transcript (when requested) and detailed abridgement.
     in_tokens = (system_chars + transcript_chars + _LOCAL_OVERHEAD_CHARS) / per_token
-    out_tokens = transcript_chars / per_token + 500
+    output_ratio = (0.65 if notes_only else 1.65) if use_extended_model else 1.0
+    out_tokens = transcript_chars / per_token * output_ratio + 500
     if in_tokens + out_tokens <= ctx - local_llm.CONTEXT_MARGIN_TOKENS and out_tokens <= local_llm.MAX_OUTPUT_TOKENS:
         return False, 0
     return True, local_llm.input_budget_chars(
-        model, chunk_system_chars + _LOCAL_OVERHEAD_CHARS, 0.15 if notes_only else 1.0,
+        model, chunk_system_chars + _LOCAL_OVERHEAD_CHARS, (0.65 if notes_only else 1.65) if use_extended_model else (0.15 if notes_only else 1.0),
     )
 
 
@@ -379,12 +358,13 @@ def _local_chunk(
     user = (
         f"{_title_label(source)}: {title} (segment {label})\n\n"
         f"--- TRANSCRIPT SEGMENT ---\n{chunk}\n--- END SEGMENT ---"
+        + (_extended_word_target(chunk) if '"extended"' in system else "")
     )
     if focus_topic:
         user += f"\nFocus topic: {focus_topic}"
     raw = None
     try:
-        for update in local_llm.stream_local(model, system, user):
+        for update in _stream_with_extended_target(model, system, user, None, chunk, "extended" if '"extended"' in system else ""):
             if update["type"] == "done":
                 raw = update["response"]
                 stats["in"] += update["input_tokens"]
@@ -488,6 +468,50 @@ def _stream_llm(model: str, system_prompt: str, user_message: str, effort: str |
     if openrouter.is_openrouter(model):
         return openrouter.stream_openrouter(model, system_prompt, user_message)
     return stream_claude(model, system_prompt, user_message, effort)
+
+
+def _stream_with_extended_target(
+    model: str, system: str, user: str, effort: str | None, source_text: str, extended_key: str,
+):
+    """Retry one overly compressed/long abridgement; never silently save a tiny extended summary."""
+    source_words = len(source_text.split())
+    input_tokens = output_tokens = 0
+    cost = elapsed = 0.0
+    for attempt in range(2):
+        done = None
+        for update in _stream_llm(model, system, user, effort):
+            if update["type"] != "done":
+                yield update
+            else:
+                done = update
+        if done is None:
+            raise RuntimeError("The model stream ended without a response.")
+        if done.get("stop_reason") in ("max_tokens", "length"):
+            raise RuntimeError("The model hit its output limit; the response is incomplete.")
+        input_tokens += done["input_tokens"]
+        output_tokens += done["output_tokens"]
+        elapsed += done.get("elapsed", 0.0)
+        reported_cost = done.get("cost_usd")
+        cost += reported_cost if reported_cost is not None else _estimate_cost(model, done["input_tokens"], done["output_tokens"])
+        # Tiny inputs and refusals use the normal response/error path.
+        if extended_key and source_words >= 100 and done.get("stop_reason") != "refusal":
+            result = parse_claude_response(done["response"])
+            extended = result.get(extended_key, "")
+            words = len(extended.split()) if isinstance(extended, str) else 0
+            if not 0.4 <= words / source_words <= 0.6:
+                if attempt == 0:
+                    user += (
+                        f"\nYour previous extended summary had {words:,} words, outside the requested range. "
+                        + _extended_word_target(source_text)
+                        + " Regenerate the full JSON result. Preserve substantive content; do not pad with invented detail."
+                    )
+                    continue
+                raise RuntimeError(
+                    f"Extended summary has {words:,} words for {source_words:,} source words after retry "
+                    "(expected 40-60%). Try another model."
+                )
+        yield {**done, "input_tokens": input_tokens, "output_tokens": output_tokens, "elapsed": elapsed, "cost_usd": cost}
+        return
 
 
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -822,7 +846,7 @@ def _run_claude_and_note(
 
     is_local = local_llm.is_local(model)
     notes_only = is_local and not request.include_transcript
-    include_extended_in_chunks = is_local and (request.extended_summary or request.focus_include_extended)
+    include_extended_in_chunks = request.extended_summary or request.focus_include_extended
     include_focus_in_chunks = is_local and bool(request.focus_topic)
     local_system = _local_chunk_system(
         notes_only, request.extract_resources, include_extended_in_chunks, include_focus_in_chunks
@@ -849,6 +873,7 @@ def _run_claude_and_note(
         )
 
         cleaned_sections: list[str] = []
+        cloud_sections: list[dict] = []
         total_in_tokens = 0
         total_out_tokens = 0
         cloud_cost = 0.0
@@ -877,9 +902,20 @@ def _run_claude_and_note(
                 f"{_title_label(source)}: {metadata['title']} (segment {i + 1}/{n_chunks})\n\n"
                 f"--- TRANSCRIPT SEGMENT ---\n{chunk}\n--- END SEGMENT ---"
             )
+            chunk_features = [f for f in features if f != "pasted"]
+            chunk_system = re.sub(r"with exactly \d+ keys:", "with these keys:", get_system_prompt(chunk_features, source=source))
+            chunk_system += '\nAlso return "heading": a short segment title. All keys refer only to this segment.'
+            if not request.include_transcript:
+                chunk_system += '\nReturn "transcript" as an empty string; preserve the detail in extended_summary.'
+            chunk_user += _extended_word_target(chunk) if include_extended_in_chunks else ""
+            if request.focus_topic:
+                chunk_user += f"\nFocus instruction: {request.focus_topic}"
             raw_chunk = None
             try:
-                for update in _stream_llm(model, _CHUNK_CLEAN_SYSTEM, chunk_user, effort):
+                for update in _stream_with_extended_target(
+                    model, chunk_system, chunk_user, effort, chunk,
+                    "extended_summary" if include_extended_in_chunks else "",
+                ):
                     if update["type"] == "done":
                         if update["stop_reason"] == "refusal":
                             yield _sse_event("error", f"{REFUSAL_MESSAGE} (chunk {i + 1})")
@@ -897,6 +933,7 @@ def _run_claude_and_note(
                 return
             try:
                 chunk_result = parse_claude_response(raw_chunk)
+                cloud_sections.append(chunk_result)
                 heading = chunk_result.get("heading", f"Part {i + 1}")
                 chunk_text = chunk_result.get("transcript", "")
                 cleaned_sections.append(f"## {heading}\n\n{chunk_text}")
@@ -933,8 +970,8 @@ def _run_claude_and_note(
             summary_body = f"Notes by section:\n{notes_text}"
         else:
             combined_cleaned = "\n\n".join(cleaned_sections)
-            chunk_summary_system = _build_chunk_summary_system(request.extract_resources, source)
-            summary_body = f"Transcript:\n{combined_cleaned[:40_000]}"
+            chunk_summary_system = _build_chunk_summary_system(False, source)
+            summary_body = "Notes by section:\n" + "\n\n".join(s.get("summary", "") for s in cloud_sections)
         summary_user = (
             f"Title: {metadata['title']}\n{source_name_label}: {source_name}\n\n{summary_body}"
         )
@@ -971,32 +1008,13 @@ def _run_claude_and_note(
         summary = summary_result.get("summary", "")
         topics = summary_result.get("topics", [])
         if is_local:
-            seen: set[str] = set()
-            resources = []
-            for sec in local_sections:
-                for r in sec["resources"] if request.extract_resources else []:
-                    name = r.get("name", "").strip() if isinstance(r, dict) else ""
-                    if name and name.lower() not in seen:
-                        seen.add(name.lower())
-                        resources.append(r)
+            resources = [r for sec in local_sections for r in sec["resources"]] if request.extract_resources else []
             extended_summary = ""
             focused_summary = ""
             if include_extended_in_chunks:
-                extended_units = [
+                extended_summary = "\n\n".join(
                     f"## {s['heading']}\n\n{s['extended']}" for s in local_sections if s.get("extended", "").strip()
-                ]
-                if extended_units:
-                    budget = local_llm.input_budget_chars(model, len(_LOCAL_REDUCE_EXTENDED_SYSTEM) + _LOCAL_OVERHEAD_CHARS, 0.15)
-                    try:
-                        before_in, before_out = local_stats["in"], local_stats["out"]
-                        extended_summary = yield from _local_reduce_extended(
-                            model, source, metadata["title"], extended_units, budget, local_stats, stage_label, total_steps,
-                        )
-                        total_in_tokens += local_stats["in"] - before_in
-                        total_out_tokens += local_stats["out"] - before_out
-                    except Exception as e:
-                        yield _sse_event("error", f"{_llm_label(model)} error on extended: {e}")
-                        return
+                )
             if include_focus_in_chunks:
                 focus_units = [
                     f"## {s['heading']}\n" + "\n".join(f"- {n}" for n in s.get("focus_notes", []))
@@ -1015,9 +1033,9 @@ def _run_claude_and_note(
                         yield _sse_event("error", f"{_llm_label(model)} error on focus: {e}")
                         return
         else:
-            resources = summary_result.get("resources", []) if request.extract_resources else []
-            extended_summary = ""
-            focused_summary = ""
+            resources = [r for s in cloud_sections for r in (s.get("resources") or [])] if request.extract_resources else []
+            extended_summary = "\n\n".join(s.get("extended_summary", "") for s in cloud_sections) if include_extended_in_chunks else ""
+            focused_summary = "\n\n".join(s.get("focused_summary", "") for s in cloud_sections) if request.focus_topic else ""
         transcript_md = combined_cleaned
         article_info = None
 
@@ -1081,9 +1099,17 @@ Multi-speaker detected: {is_multi_speaker}{focus_line}
 
 Please process this transcript according to the instructions."""
 
+        if include_extended_in_chunks:
+            user_message += _extended_word_target(raw_text)
+        if source != "web" and not request.include_transcript:
+            system_prompt += '\nReturn "transcript" as an empty string; preserve the detail in extended_summary.'
+
         raw_response = None
         try:
-            for update in _stream_llm(model, system_prompt, user_message, effort):
+            for update in _stream_with_extended_target(
+                model, system_prompt, user_message, effort, raw_text,
+                "extended_summary" if include_extended_in_chunks else "",
+            ):
                 if update["type"] == "progress":
                     elapsed = _fmt_elapsed(update["elapsed"])
                     in_tok = _fmt_tokens(update["input_tokens"])
@@ -1151,6 +1177,26 @@ Please process this transcript according to the instructions."""
             metadata["published"] = (result.get("published") or "").strip()
             body = trim_to_body(raw_text, result.get("body_first_words") or "", result.get("body_last_words") or "")
             set_word_count(metadata, body)
+            raw_text = body
+
+    resources = _verified_resources(resources, raw_text)
+
+    import_settings = {
+        "mode": "focus_topic" if request.focus_topic else (
+            "extended_summary" if request.extended_summary else (
+                "article_summary" if source == "web" else "transcript"
+            )
+        ),
+        "selected_model": request.extended_model if use_extended_model else request.model,
+        "model": model,
+        "extended_summary": request.extended_summary,
+        "focus_topic": request.focus_topic or "",
+        "focus_include_extended": request.focus_include_extended,
+        "include_transcript": request.include_transcript,
+        "extract_resources": request.extract_resources,
+    }
+    if source == "podcast":
+        import_settings["whisper_language"] = request.whisper_language or "auto"
 
     # Step 4: Build note
     yield _sse_event("building", f"Step 4/{total_steps} — Building Obsidian note…",
@@ -1165,6 +1211,7 @@ Please process this transcript according to the instructions."""
         resources=resources,
         transcript_source_label=transcript_source_label,
         article_info=article_info,
+        import_settings=import_settings,
     )
 
     yield _sse_event(
@@ -1206,14 +1253,19 @@ def _estimate_item_cost(duration_s: int, opts: BatchOptions) -> float:
     minutes = max(duration_s, 60) / 60
     transcript = minutes * EST_TOKENS_PER_MINUTE
     inp = transcript + EST_SYSTEM_TOKENS
-    out = EST_SUMMARY_OUTPUT_TOKENS * (2 if use_extended else 1)
+    out = EST_SUMMARY_OUTPUT_TOKENS
+    if opts.extended_summary or opts.focus_include_extended:
+        out += int(transcript * 0.5)
+    if opts.focus_topic:
+        out += EST_SUMMARY_OUTPUT_TOKENS
     if opts.include_transcript:
         out += transcript
     chars = minutes * EST_CHARS_PER_MINUTE
     if local_llm.is_local(model):
         return 0.0
-    if not use_extended and chars > _CHUNK_THRESHOLD_CHARS:
-        n_chunks = math.ceil(chars / _CHUNK_CHARS)
+    threshold = _EXTENDED_CHUNK_CHARS if use_extended else _CHUNK_THRESHOLD_CHARS
+    if chars > threshold:
+        n_chunks = math.ceil(chars / (_EXTENDED_CHUNK_CHARS if use_extended else _CHUNK_CHARS))
         inp += n_chunks * EST_CHUNK_OVERHEAD_TOKENS + min(transcript, 10_000)  # + summary call
         out += n_chunks * 50
     if not openrouter.is_openrouter(model):
