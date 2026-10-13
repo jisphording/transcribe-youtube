@@ -8,7 +8,7 @@ ROLE_PREAMBLE = "editorial writer"
 JSON_KEYS = [
     {
         "key": "extended_summary",
-        "description": "A thorough, topic-by-topic summary of the entire video that stays close to the speaker's own words and weaves in exact quotes.",
+        "description": "A detailed abridgement, approximately half the source word count, of the entire video that stays close to the speaker's own words and weaves in exact quotes.",
     },
 ]
 
@@ -20,6 +20,7 @@ RULES = """Rules for "extended_summary":
 - Quotes must be exact text from the transcript (filler removed is fine), wrapped in typographic quotes “…” and attributed when there are several speakers (e.g. As the guest puts it, “…”).
 - Use ## Markdown headings for each topic section.
 - Each section should be several paragraphs of prose with quotes woven in.
-- Length is determined by the content: aim to be comprehensive without padding.
+- Target approximately 50% of the source word count (40-60%). Scale with the source, even for multi-hour videos; do not impose a fixed paragraph or page limit. The separate summary key is the short executive summary.
+- Preserve substantive examples, anecdotes, reasoning steps, counterarguments, caveats, instructions, names and numbers, including later topics. Remove repetition and filler rather than distinct content. Use substantial verbatim passages alongside lightly edited prose; never replace a detailed discussion with a topic label.
 - Do NOT include timestamps or meta-commentary about the video format.
 - This should read as a standalone document — someone who has not watched the video should come away fully informed."""
