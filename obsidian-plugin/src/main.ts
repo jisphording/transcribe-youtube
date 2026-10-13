@@ -145,25 +145,35 @@ export default class YTObsidianPlugin extends Plugin {
         return await this.app.vault.create(finalPath, content);
     }
 
-    async createResourceStubs(resources: SSEResource[]): Promise<void> {
+    async createResourceStubs(resources: SSEResource[], mentioningNote?: TFile): Promise<void> {
         const folder = this.resourceFolder();
         await this.ensureFolder(folder);
 
         const folderPrefix = folder + "/";
         const allFiles = this.app.vault.getFiles();
+        const link = mentioningNote
+            ? `[[${mentioningNote.path.replace(/\.md$/i, "")}|${mentioningNote.basename}]]`
+            : "";
 
         for (const resource of resources) {
             const name = resource.name.trim();
             if (!name) continue;
 
-            const alreadyExists = allFiles.some(
+            const existing = allFiles.find(
                 (f) => f.basename.toLowerCase() === name.toLowerCase() && f.path.startsWith(folderPrefix)
             );
-            if (alreadyExists) continue;
-
             const stubPath = normalizePath(`${folder}/${name}.md`);
-            if (!this.app.vault.getAbstractFileByPath(stubPath)) {
-                await this.app.vault.create(stubPath, "");
+            const stub = existing ?? (this.app.vault.getAbstractFileByPath(stubPath) as TFile | null)
+                ?? await this.app.vault.create(stubPath, "");
+            if (!existing) allFiles.push(stub);
+            if (link) {
+                const content = await this.app.vault.read(stub);
+                if (content.includes(link)) continue;
+                const section = `## Mentioned in\n\n- ${link}`;
+                const updated = content.includes("## Mentioned in")
+                    ? `${content.trimEnd()}\n- ${link}\n`
+                    : `${content.trimEnd()}${content.trim() ? "\n\n" : ""}${section}\n`;
+                await this.app.vault.modify(stub, updated);
             }
         }
     }

@@ -3,6 +3,7 @@ import json
 import math
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -1429,7 +1430,11 @@ def _process_batch_item(item: dict, batch: dict) -> dict:
     result["note_path"] = vault.write_note(folders[source], done["filename"], done["content"])
     names = [r.get("name", "") for r in done.get("resources") or []]
     if names:
-        vault.create_resource_stubs(folders["resources"], names)
+        vault_root = Path(cfg["vault_root"]).resolve()
+        note_target = Path(result["note_path"]).resolve().relative_to(vault_root).with_suffix("").as_posix()
+        vault.create_resource_stubs(
+            folders["resources"], names, note_target, Path(result["note_path"]).stem,
+        )
     return result
 
 

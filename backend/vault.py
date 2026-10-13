@@ -55,17 +55,37 @@ def _safe_stub_name(name: str) -> str:
     return re.sub(r"\s+", " ", name)[:120]
 
 
-def create_resource_stubs(folder: str, names: list[str]) -> None:
-    """Empty `<name>.md` per resource, unless a file with that name exists (case-insensitive)."""
+def create_resource_stubs(
+    folder: str,
+    names: list[str],
+    mention_target: str | None = None,
+    mention_title: str = "",
+) -> None:
+    """Create resource notes and add a deduplicated backlink to the mentioning note."""
     target_dir = Path(folder)
     target_dir.mkdir(parents=True, exist_ok=True)
-    existing = {p.stem.lower() for p in target_dir.rglob("*.md")}
+    existing = {p.stem.lower(): p for p in target_dir.rglob("*.md")}
+    link = f"[[{mention_target}|{mention_title}]]" if mention_target else ""
     for raw in names:
         name = _safe_stub_name(raw)
-        if not name or name.lower() in existing:
+        if not name:
             continue
-        (target_dir / f"{name}.md").touch()
-        existing.add(name.lower())
+        path = existing.get(name.lower())
+        if path is None:
+            path = target_dir / f"{name}.md"
+            path.touch()
+            existing[name.lower()] = path
+        if not link:
+            continue
+        content = path.read_text(encoding="utf-8", errors="ignore")
+        if link in content:
+            continue
+        section = f"## Mentioned in\n\n- {link}"
+        if "## Mentioned in" in content:
+            content = content.rstrip() + f"\n- {link}\n"
+        else:
+            content = content.rstrip() + ("\n\n" if content.strip() else "") + section + "\n"
+        path.write_text(content, encoding="utf-8")
 
 
 def _frontmatter(path: Path) -> str:

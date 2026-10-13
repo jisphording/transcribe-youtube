@@ -73,6 +73,8 @@ Several paragraphs of synthesized editorial prose…
 Cleaned transcript text without filler words, broken into chapters…
 ```
 
+Each mentioned resource note also keeps a `Mentioned in` list linking back to every transcript that mentions it. These links accumulate across imports and appear in Obsidian's graph view.
+
 **Podcast note** (same structure, source-aware fields):
 
 ```markdown
