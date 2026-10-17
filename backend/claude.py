@@ -58,22 +58,30 @@ def stream_claude(
     raw_response = ""
     output_tokens = 0
     input_tokens = 0
+    cache_read_tokens = 0
+    cache_write_tokens = 0
     stop_reason = None
     start_time = time.time()
 
     max_tokens = MODEL_MAX_OUTPUT_TOKENS.get(validated_model, 8192)
     extra = {"output_config": {"effort": effort}} if effort else {}
 
+    # The system prompt is the only content shared across requests; the transcript is unique.
+    # Below the model's minimum cacheable length this is a free no-op.
     with client, client.messages.stream(
         model=validated_model,
         max_tokens=max_tokens,
-        system=system_prompt,
+        system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": user_message}],
         **extra,
     ) as stream:
         for event in stream:
             if event.type == "message_start":
-                input_tokens = event.message.usage.input_tokens
+                usage = event.message.usage
+                cache_read_tokens = usage.cache_read_input_tokens or 0
+                cache_write_tokens = usage.cache_creation_input_tokens or 0
+                # API input_tokens excludes cached tokens; report the full prompt size.
+                input_tokens = usage.input_tokens + cache_read_tokens + cache_write_tokens
                 yield {
                     "type": "progress",
                     "input_tokens": input_tokens,
@@ -104,10 +112,17 @@ def stream_claude(
                 if hasattr(event.usage, "output_tokens"):
                     output_tokens = event.usage.output_tokens
 
+    print(
+        f"claude usage: model={validated_model} input={input_tokens} "
+        f"cache_read={cache_read_tokens} cache_write={cache_write_tokens} output={output_tokens}",
+        flush=True,
+    )
     yield {
         "type": "done",
         "response": raw_response,
         "input_tokens": input_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
         "output_tokens": output_tokens,
         "elapsed": time.time() - start_time,
         "stop_reason": stop_reason,

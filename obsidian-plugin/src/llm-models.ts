@@ -16,3 +16,8 @@ export const OPENROUTER_MODELS: Record<string, string> = {
 };
 
 export const DEFAULT_OPENROUTER_MODEL = Object.keys(OPENROUTER_MODELS)[0];
+
+export const ANTIGRAVITY_MODELS: Record<string, string> = {
+    "antigravity:gemini-3.8-flash-medium": "Gemini 3.8 Flash (subscription quota)",
+};
+export const DEFAULT_ANTIGRAVITY_MODEL = Object.keys(ANTIGRAVITY_MODELS)[0];

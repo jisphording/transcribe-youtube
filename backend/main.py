@@ -24,6 +24,7 @@ from note import build_obsidian_note
 from claude import stream_claude, parse_claude_response, resolve_model, DEFAULT_MODEL, DEFAULT_EXTENDED_MODEL, HAIKU, SONNET, OPUS, FABLE
 import openrouter
 import local_llm
+import antigravity
 from cookies import has_cookies, save_cookies, delete_cookies
 import vault
 import batch_queue
@@ -438,16 +439,20 @@ def _sse_event(stage: str, message: str, **extra) -> str:
 
 # Pricing per million tokens (USD)
 MODEL_PRICING = {
-    HAIKU:  {"input": 0.10, "output": 0.50},
-    SONNET: {"input": 2.00, "output": 10.00},
-    OPUS:   {"input": 4.00, "output": 20.00},
-    FABLE:  {"input": 10.00, "output": 50.00},
+    HAIKU:  {"input": 0.10, "output": 0.50, "cache_read": 0.01},
+    SONNET: {"input": 2.00, "output": 10.00, "cache_read": 0.20},
+    OPUS:   {"input": 4.00, "output": 20.00, "cache_read": 0.20},
+    FABLE:  {"input": 10.00, "output": 50.00, "cache_read": 1.00},
 }
+CACHE_WRITE_MULTIPLIER = 1.25
 
 REFUSAL_MESSAGE = "The selected model declined to process this content (safety refusal)."
 
 
 def _resolve_llm(model: str | None, default: str) -> str:
+    if antigravity.is_antigravity(model):
+        antigravity.validate_model(model)
+        return model
     if openrouter.is_openrouter(model):
         openrouter.model_info(model)
         return model
@@ -455,6 +460,9 @@ def _resolve_llm(model: str | None, default: str) -> str:
 
 
 def _llm_label(model: str) -> str:
+    if antigravity.is_antigravity(model):
+        antigravity.validate_model(model)
+        return "Gemini 3.8 Flash via Antigravity subscription"
     if local_llm.is_local(model):
         return local_llm.model_id(model)
     if openrouter.is_openrouter(model):
@@ -463,6 +471,8 @@ def _llm_label(model: str) -> str:
 
 
 def _stream_llm(model: str, system_prompt: str, user_message: str, effort: str | None):
+    if antigravity.is_antigravity(model):
+        return antigravity.stream_antigravity(model, system_prompt, user_message)
     if local_llm.is_local(model):
         return local_llm.stream_local(model, system_prompt, user_message)
     if openrouter.is_openrouter(model):
@@ -514,17 +524,29 @@ def _stream_with_extended_target(
         return
 
 
-def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+def _estimate_cost(
+    model: str, input_tokens: int, output_tokens: int,
+    cache_read_tokens: int = 0, cache_write_tokens: int = 0,
+) -> float:
+    if antigravity.is_antigravity(model):
+        antigravity.validate_model(model)
+        return 0.0
     if local_llm.is_local(model):
         return 0.0
     if openrouter.is_openrouter(model):
         pricing = openrouter.model_info(model)
-    else:
-        resolved = resolve_model(model, DEFAULT_MODEL)
-        pricing = MODEL_PRICING[resolved]
-        if resolved == HAIKU and input_tokens > 100_000:
-            pricing = {"input": 0.50, "output": 2.50}
-    return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+        return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+    resolved = resolve_model(model, DEFAULT_MODEL)
+    pricing = MODEL_PRICING[resolved]
+    if resolved == HAIKU and input_tokens > 100_000:
+        pricing = {"input": 0.50, "output": 2.50, "cache_read": 0.05}
+    uncached = input_tokens - cache_read_tokens - cache_write_tokens
+    return (
+        uncached * pricing["input"]
+        + cache_read_tokens * pricing["cache_read"]
+        + cache_write_tokens * pricing["input"] * CACHE_WRITE_MULTIPLIER
+        + output_tokens * pricing["output"]
+    ) / 1_000_000
 
 
 def _fmt_tokens(n: int) -> str:
@@ -845,6 +867,7 @@ def _run_claude_and_note(
         stage_label = "claude"
 
     is_local = local_llm.is_local(model)
+    uses_subscription = antigravity.is_antigravity(model)
     notes_only = is_local and not request.include_transcript
     include_extended_in_chunks = request.extended_summary or request.focus_include_extended
     include_focus_in_chunks = is_local and bool(request.focus_topic)
@@ -994,10 +1017,11 @@ def _run_claude_and_note(
         cost = 0.0 if is_local else cloud_cost
         yield _sse_event(
             "claude_done",
-            f"Step 3/{total_steps} — {_llm_label(model)} done! {_fmt_tokens(total_in_tokens)} in → {_fmt_tokens(total_out_tokens)} out ({_fmt_elapsed(elapsed_total)}, {total_out_tokens / max(elapsed_total, 0.1):.0f} tok/s)",
+            f"Step 3/{total_steps} — {_llm_label(model)} done! {_fmt_tokens(total_in_tokens)} in → {_fmt_tokens(total_out_tokens)} out ({_fmt_elapsed(elapsed_total)}, {total_out_tokens / max(elapsed_total, 0.1):.0f} tok/s)" + (" · subscription quota used" if uses_subscription else ""),
             step=3, total_steps=total_steps,
             input_tokens=total_in_tokens, output_tokens=total_out_tokens,
             elapsed=round(elapsed_total, 1), cost_usd=round(cost, 4),
+            cost_kind="subscription_quota" if uses_subscription else "api_dollars",
         )
 
         try:
@@ -1133,17 +1157,24 @@ Please process this transcript according to the instructions."""
                     elapsed = _fmt_elapsed(update["elapsed"])
                     in_tok = _fmt_tokens(update["input_tokens"])
                     out_tok = _fmt_tokens(update["output_tokens"])
+                    cache_read = update.get("cache_read_tokens", 0)
                     cost = update.get("cost_usd")
                     if cost is None:
-                        cost = _estimate_cost(model, update["input_tokens"], update["output_tokens"])
+                        cost = _estimate_cost(
+                            model, update["input_tokens"], update["output_tokens"],
+                            cache_read, update.get("cache_write_tokens", 0),
+                        )
+                    cached_note = f", {_fmt_tokens(cache_read)} cached" if cache_read else ""
                     yield _sse_event(
                         "claude_done",
-                        f"Step 3/{total_steps} — {_llm_label(model)} done! {in_tok} in → {out_tok} out ({elapsed}, {update['output_tokens'] / max(update['elapsed'], 0.1):.0f} tok/s)",
+                        f"Step 3/{total_steps} — {_llm_label(model)} done! {in_tok} in{cached_note} → {out_tok} out ({elapsed}, {update['output_tokens'] / max(update['elapsed'], 0.1):.0f} tok/s)",
                         step=3, total_steps=total_steps,
                         input_tokens=update["input_tokens"],
                         output_tokens=update["output_tokens"],
+                        cache_read_tokens=cache_read,
                         elapsed=round(update["elapsed"], 1),
                         cost_usd=round(cost, 4),
+                        cost_kind="subscription_quota" if antigravity.is_antigravity(model) else "api_dollars",
                     )
         except Exception as e:
             yield _sse_event("error", f"{_llm_label(model)} error: {e}")

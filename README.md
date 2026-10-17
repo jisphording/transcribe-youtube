@@ -4,7 +4,7 @@ Import any YouTube video **or Apple Podcasts episode** as a clean, structured Ob
 
 ```
 YouTube URL    ─┐
-                ├─→  [native Python backend on macOS]  →  Claude / OpenRouter API  →  Obsidian Note
+                ├─→  [native Python backend on macOS]  →  Claude / OpenRouter / Antigravity  →  Obsidian Note
 Apple Podcast ─┘            │
                             └─→  podcast:transcript  →  free
                                  (RSS Podcasting 2.0)
@@ -190,7 +190,7 @@ Current model references: [Anthropic models](https://platform.claude.com/docs/en
 - macOS (Apple Silicon recommended for whisper performance; Intel works for YouTube only)
 - [Homebrew](https://brew.sh)
 - [Node.js](https://nodejs.org) (only needed for building the Obsidian plugin)
-- An [Anthropic API key](https://console.anthropic.com)
+- An [Anthropic API key](https://console.anthropic.com) for Claude (not required when using the Antigravity subscription provider)
 - **For podcasts:** whisper.cpp (installed by `backend/scripts/whisper-setup.sh`) — only required for shows without an RSS transcript
 
 You do **not** need a pre-installed Python — `uv` installs the right version (3.12) into its own cache.
@@ -327,6 +327,10 @@ tail -f /tmp/whisper-server.log /tmp/whisper-server.err  # logs
 ---
 
 ## Using it
+
+### Antigravity subscription model
+
+In plugin settings choose **Antigravity subscription** to process captions and transcripts with Gemini 3.8 Flash. This uses the signed-in Google account's subscription quota; the backend reports zero incremental API-dollar cost and does not describe that quota as unlimited or free. Install and sign in to the Antigravity CLI separately, then set the absolute `ANTIGRAVITY_CLI_PATH` in `backend/.env` (see `backend/.env.example`) and restart the backend. The provider is macOS-only and refuses to run if `sandbox-exec` containment is unavailable. Set `ANTIGRAVITY_VAULT_PATHS` to any vault paths that must be explicitly denied; the repository and `/Volumes` are denied by default. Imports never install, update, or log into the CLI.
 
 ### Trigger the import
 - Click the audio-file icon in the left ribbon, **or**

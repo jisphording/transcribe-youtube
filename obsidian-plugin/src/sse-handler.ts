@@ -102,7 +102,7 @@ export async function processSSEStream(response: Response, callbacks: SSECallbac
                     if (event.input_tokens || event.output_tokens) {
                         const inTok = ((event.input_tokens as number) ?? 0).toLocaleString();
                         const outTok = ((event.output_tokens as number) ?? 0).toLocaleString();
-                        const costStr = costUsd != null ? ` · $${costUsd.toFixed(4)}` : "";
+                        const costStr = event.cost_kind === "subscription_quota" ? " · subscription quota" : costUsd != null ? ` · $${costUsd.toFixed(4)}` : "";
                         callbacks.onDetail(`Total: ${inTok} input + ${outTok} output tokens${costStr}`);
                     }
                     break;

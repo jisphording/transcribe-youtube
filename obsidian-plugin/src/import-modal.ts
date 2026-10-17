@@ -5,7 +5,7 @@ import { processSSEStream, ManualPasteRequiredError } from "./sse-handler";
 import { BatchPanel } from "./batch-panel";
 import { enqueueItem, BatchOptions } from "./batch-api";
 
-import { MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, CLAUDE_MODELS, OPENROUTER_MODELS, DEFAULT_OPENROUTER_MODEL } from "./llm-models";
+import { MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS, CLAUDE_MODELS, OPENROUTER_MODELS, DEFAULT_OPENROUTER_MODEL, ANTIGRAVITY_MODELS, DEFAULT_ANTIGRAVITY_MODEL } from "./llm-models";
 
 export class YouTubeImportModal extends Modal {
     plugin: YTObsidianPlugin;
@@ -130,7 +130,7 @@ export class YouTubeImportModal extends Modal {
                     b.style.color = isActive ? "var(--text-on-accent)" : "var(--text-normal)";
                 });
                 this.focusTopicWrapper.style.display = value === "focus_topic" ? "block" : "none";
-                if (this.plugin.settings.llmProvider === "openrouter") return;
+                if (this.plugin.settings.llmProvider !== "anthropic") return;
                 if (value === "transcript") {
                     this.modelSelect.value = MODEL_HAIKU;
                 } else {
@@ -165,7 +165,7 @@ export class YouTubeImportModal extends Modal {
         this.focusIncludeExtendedCheckbox.id = "yt-focus-include-extended";
         this.focusIncludeExtendedCheckbox.checked = false;
         this.focusIncludeExtendedCheckbox.addEventListener("change", () => {
-            if (this.plugin.settings.llmProvider === "openrouter") return;
+            if (this.plugin.settings.llmProvider !== "anthropic") return;
             if (this.focusIncludeExtendedCheckbox.checked) {
                 this.modelSelect.value = MODEL_OPUS;
             } else {
@@ -194,17 +194,21 @@ export class YouTubeImportModal extends Modal {
             cls: "dropdown",
         });
         const useOpenRouter = this.plugin.settings.llmProvider === "openrouter";
-        const models = useOpenRouter ? OPENROUTER_MODELS : CLAUDE_MODELS;
+        const useAntigravity = this.plugin.settings.llmProvider === "antigravity";
+        const models = useOpenRouter ? OPENROUTER_MODELS : useAntigravity ? ANTIGRAVITY_MODELS : CLAUDE_MODELS;
         for (const [value, text] of Object.entries(models)) {
             this.modelSelect.createEl("option", { text, value });
         }
         this.modelSelect.value = useOpenRouter
             ? (this.plugin.settings.openrouterModel in OPENROUTER_MODELS
                 ? this.plugin.settings.openrouterModel : DEFAULT_OPENROUTER_MODEL)
-            : MODEL_HAIKU;
+            : useAntigravity ? (this.plugin.settings.antigravityModel in ANTIGRAVITY_MODELS ? this.plugin.settings.antigravityModel : DEFAULT_ANTIGRAVITY_MODEL) : MODEL_HAIKU;
         this.modelSelect.addEventListener("change", async () => {
             if (useOpenRouter) {
                 this.plugin.settings.openrouterModel = this.modelSelect.value;
+                await this.plugin.saveSettings();
+            } else if (useAntigravity) {
+                this.plugin.settings.antigravityModel = this.modelSelect.value;
                 await this.plugin.saveSettings();
             }
         });
@@ -543,7 +547,7 @@ export class YouTubeImportModal extends Modal {
             new Notice(`Created: ${file.path}`);
             this.progressBarInner.style.width = "100%";
             this.setStatus(`✓ Done! Note saved as "${file.path}"`, "success");
-            this.setDetail(result.costUsd != null ? `Estimated cost: $${result.costUsd.toFixed(4)}` : "");
+            this.setDetail(this.plugin.settings.llmProvider === "antigravity" ? "Subscription quota used (no per-request API-dollar charge)." : result.costUsd != null ? `Estimated cost: $${result.costUsd.toFixed(4)}` : "");
 
             await this.app.workspace.openLinkText(file.path, "", false);
 

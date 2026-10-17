@@ -140,7 +140,7 @@ export class BatchPanel {
         summary.style.marginBottom = "6px";
         summary.setText(
             `${p.title}: ${fresh.length} to import` + (dupes ? `, ${dupes} already in your vault` : "") +
-            (fresh.length ? ` · estimated ${fmtUsd(p.estimate.low)}–${fmtUsd(p.estimate.high)} (${p.estimate.model})` : "")
+            (fresh.length ? (p.estimate.model.startsWith("antigravity:") ? ` · subscription quota applies (${p.estimate.model})` : ` · estimated ${fmtUsd(p.estimate.low)}–${fmtUsd(p.estimate.high)} (${p.estimate.model})`) : "")
         );
         const notes: string[] = [];
         if (p.has_more && p.count_requested == null) notes.push("More than 20 new items — showing the latest 20. Enter a count to import more.");
@@ -173,7 +173,7 @@ export class BatchPanel {
             title.style.textOverflow = "ellipsis";
             title.style.whiteSpace = "nowrap";
             row.createSpan({ text: (item.duration_estimated ? "~" : "") + fmtDuration(item.duration_seconds) });
-            row.createSpan({ text: fmtUsd(item.cost_estimate) });
+            row.createSpan({ text: p.estimate.model.startsWith("antigravity:") ? "subscription quota" : fmtUsd(item.cost_estimate) });
         }
 
         if (p.batch_id) {
@@ -181,7 +181,7 @@ export class BatchPanel {
             this.previewBtn.addClass("mod-muted");
             this.startBtn.setText(`Start import (${fresh.length})`);
             this.startBtn.style.display = "";
-            this.host.setStatus("Check the list and the estimated cost, then start the import.", "info");
+            this.host.setStatus(p.estimate.model.startsWith("antigravity:") ? "Check the list and subscription quota usage, then start the import." : "Check the list and the estimated cost, then start the import.", "info");
         } else {
             this.host.setStatus(
                 dupes

@@ -159,7 +159,8 @@ export class QueueView extends ItemView {
         const finished = total - (batch.counts.pending ?? 0) - (batch.counts.running ?? 0);
         const title = box.createDiv({ text: `${batch.source === "podcast" ? "🎙" : "▶"} ${batch.title || batch.source_url}` });
         title.style.fontWeight = "600";
-        this.muted(box, `${batch.state} · ${finished}/${total} · cost ${fmtUsd(batch.cost_usd)}${batch.estimate.unknown ? "" : ` (est. ${fmtUsd(batch.estimate.low)}–${fmtUsd(batch.estimate.high)})`}`);
+        const subscription = batch.estimate.model.startsWith("antigravity:");
+        this.muted(box, `${batch.state} · ${finished}/${total} · ${subscription ? "subscription quota used" : `cost ${fmtUsd(batch.cost_usd)}${batch.estimate.unknown ? "" : ` (est. ${fmtUsd(batch.estimate.low)}–${fmtUsd(batch.estimate.high)})`}`}`);
 
         const btnRow = box.createDiv();
         btnRow.style.display = "flex";

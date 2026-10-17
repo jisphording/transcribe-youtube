@@ -5,12 +5,13 @@ import {
     Setting,
 } from "obsidian";
 import type YTObsidianPlugin from "./main";
-import { OPENROUTER_MODELS, DEFAULT_OPENROUTER_MODEL } from "./llm-models";
+import { OPENROUTER_MODELS, DEFAULT_OPENROUTER_MODEL, DEFAULT_ANTIGRAVITY_MODEL } from "./llm-models";
 
 export interface YTObsidianSettings {
     apiUrl: string;
-    llmProvider: "anthropic" | "openrouter";
+    llmProvider: "anthropic" | "openrouter" | "antigravity";
     openrouterModel: string;
+    antigravityModel: string;
     useParentFolder: boolean;       // true: folders below mediaTranscriptsFolder; false: siblings in vault root
     mediaTranscriptsFolder: string; // Parent folder (only used when useParentFolder is on)
     youtubeFolder: string;
@@ -28,6 +29,7 @@ export const DEFAULT_SETTINGS: YTObsidianSettings = {
     apiUrl: "http://127.0.0.1:8000",
     llmProvider: "anthropic",
     openrouterModel: DEFAULT_OPENROUTER_MODEL,
+    antigravityModel: DEFAULT_ANTIGRAVITY_MODEL,
     useParentFolder: true,
     mediaTranscriptsFolder: "MEDIA_Transcripts",
     youtubeFolder: "YouTube",
@@ -68,12 +70,13 @@ export class YTObsidianSettingTab extends PluginSettingTab {
         containerEl.createEl("h3", { text: "AI models" });
         new Setting(containerEl)
             .setName("AI provider")
-            .setDesc("Used for single and bulk imports. Configure the provider's API key in backend/.env and restart the backend.")
+            .setDesc("Used for single and bulk imports. Antigravity uses your signed-in Google subscription quota.")
             .addDropdown((dropdown) => dropdown
                 .addOption("anthropic", "Anthropic Claude (default)")
                 .addOption("openrouter", "OpenRouter")
+                .addOption("antigravity", "Antigravity subscription")
                 .setValue(this.plugin.settings.llmProvider)
-                .onChange(async (value: "anthropic" | "openrouter") => {
+                .onChange(async (value: "anthropic" | "openrouter" | "antigravity") => {
                     this.plugin.settings.llmProvider = value;
                     this.plugin.settings.localModel = "";
                     await this.plugin.saveSettings();
@@ -88,6 +91,17 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                     .setValue(this.plugin.settings.openrouterModel)
                     .onChange(async (value) => {
                         this.plugin.settings.openrouterModel = value;
+                        await this.plugin.saveSettings();
+                    }));
+        }
+        if (this.plugin.settings.llmProvider === "antigravity") {
+            new Setting(containerEl).setName("Antigravity model")
+                .setDesc("Gemini 3.8 Flash uses quota from the signed-in Google account.")
+                .addDropdown((dropdown) => dropdown
+                    .addOption(DEFAULT_ANTIGRAVITY_MODEL, "Gemini 3.8 Flash")
+                    .setValue(this.plugin.settings.antigravityModel)
+                    .onChange(async (value) => {
+                        this.plugin.settings.antigravityModel = value;
                         await this.plugin.saveSettings();
                     }));
         }

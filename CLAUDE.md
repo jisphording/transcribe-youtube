@@ -7,7 +7,7 @@ A full-stack app that imports YouTube videos, Apple Podcasts episodes **and** we
 - **Frontend:** TypeScript Obsidian plugin (`obsidian-plugin/`)
 - **Backend:** Python FastAPI with SSE streaming (`backend/`)
 - **Deployment:** macOS LaunchAgents (uvicorn + whisper-server, managed via `backend/scripts/`)
-- **AI:** Anthropic Claude API (Haiku 5.5 / Sonnet 5.5 / Opus 5.5 / Fable 5.1; effort `low` for base, `medium` for extended/focus); optional OpenRouter (DeepSeek V4.1 Flash default, Qwen3.5 Flash, Gemini 3.1 Flash Lite preview)
+- **AI:** Anthropic Claude API (Haiku 5.5 / Sonnet 5.5 / Opus 5.5 / Fable 5.1; effort `low` for base, `medium` for extended/focus); optional OpenRouter (DeepSeek V4.1 Flash default, Qwen3.5 Flash, Gemini 3.1 Flash Lite preview) and Antigravity subscription (Gemini 3.8 Flash)
 - **Local STT:** whisper.cpp via local HTTP server (Apple Silicon, Metal-accelerated)
 
 ## Code Style
@@ -31,8 +31,9 @@ Each file has a single responsibility. Do not merge concerns across modules.
 | `podcast.py` | Apple URL parsing, iTunes lookup, RSS fetch (`feedparser`), episode matching (slug, or guid in batch mode), RSS transcript extractor (Podcasting 2.0), show listing (`list_show_episodes`) | — |
 | `whisper.py` | Local whisper-server HTTP client. Downloads audio → POSTs to `whisper-server` → returns transcript | — |
 | `web.py` | Web article fetch (HTML only — no images/scripts/linked pages), accessibility checks, main-text + metadata extraction via `trafilatura`, URL cleaning | — |
-| `claude.py` | Claude API streaming, response parsing, model constants | — |
 | `openrouter.py` | Curated cloud model catalog, pricing, OpenRouter streaming with progress/done contract; `openrouter:` model IDs, reasoning disabled, cheapest compatible provider | — |
+| `antigravity.py` | Curated Antigravity subscription model and contained `agy` process; `antigravity:` IDs; macOS sandbox-exec required with no uncontained fallback | — |
+| `claude.py` | Claude API streaming, response parsing, model constants. Marks the system prompt with `cache_control` (caches on Opus 5.5; below the minimum on Haiku 4.5, mostly on Sonnet 5) and logs `claude usage: … cache_read=… cache_write=…` per call to stdout | — |
 | `local_llm.py` | Optional local LLM via an OpenAI-compatible server (`LOCAL_LLM_URL`, default MLX Core on `:11234`): `list_models()` (served models + installed ones under `LOCAL_LLM_MODELS_DIR`, each with a `status`), `stream_local()` with the same yield contract as `stream_claude()`. Model ids are prefixed `local:` | — |
 | `note.py` | Source-agnostic Obsidian markdown note assembly (YouTube + podcast variants, separate web article layout) | — |
 | `cookies.py` | Cookie file persistence (save/delete/check) | — |
@@ -49,6 +50,7 @@ Each file has a single responsibility. Do not merge concerns across modules.
 **Rules:**
 - `youtube.py`, `podcast.py`, `whisper.py`, `web.py`, `claude.py`, `openrouter.py`, `local_llm.py`, `note.py`, `cookies.py`, `vault.py` and `batch_queue.py` must NOT import from each other. They are independent modules orchestrated only by `main.py`.
 - `models.py` contains only Pydantic models — no logic.
+- Antigravity runs through `backend/antigravity.py` using the approved custom-agent and macOS sandbox contract in `docs/antigravity-cli-contract.md`. Configure `ANTIGRAVITY_CLI_PATH` and optional `ANTIGRAVITY_VAULT_PATHS`; requests consume signed-in subscription quota rather than API dollars.
 - Prompt modules expose only `ROLE_PREAMBLE`, `JSON_KEYS`, and `RULES` — no functions.
 - The prompt composer (`prompts.get_system_prompt`) takes a `source` argument (`"youtube"`, `"podcast"` or `"web"`) so the same feature flags work for all sources — the wording adapts. For `"web"` it swaps `base` for `article`.
 
@@ -259,6 +261,8 @@ Three-tier priority for YouTube authentication:
 Podcasts don't need cookies — RSS feeds are public.
 
 ## Notes for Claude
+
+- Antigravity subscription integration follows the tested custom-agent plus full-process macOS containment contract in `docs/antigravity-cli-contract.md`; session-local `manage_task` bookkeeping is the approved exception. Never launch an uncontained fallback. Service validation remains a separate planned phase.
 
 - When modifying the backend, keep modules independent. If a change touches `youtube.py`, it should NOT require changes to `claude.py`, `podcast.py`, `whisper.py`, or `note.py` unless the interface contract changes.
 - When modifying SSE events, update the backend emitter (`main.py`) and the frontend consumer in `sse-handler.ts` together.

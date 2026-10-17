@@ -14,6 +14,24 @@ def done(result):
 
 
 class SummaryQualityTests(unittest.TestCase):
+    def test_unsupported_antigravity_model_never_falls_back_to_claude(self):
+        with patch.object(main, 'resolve_model') as claude_resolver:
+            with self.assertRaises(ValueError):
+                main._resolve_llm('antigravity:unsupported', main.DEFAULT_MODEL)
+        claude_resolver.assert_not_called()
+
+    def test_antigravity_selection_builds_note_with_prefixed_model_metadata(self):
+        model = 'antigravity:gemini-3.8-flash-medium'
+        req = TranscriptRequest(url='url', model=model, extended_model=model, include_transcript=False)
+        result = {'summary': 'A concise summary.', 'transcript': '', 'topics': ['test']}
+        with patch.object(main, '_stream_llm', return_value=iter([done(result)])) as stream:
+            events = [json.loads(event) for event in main._run_claude_and_note(
+                req, {'title': 'Title', 'channel': 'Channel', 'channel_url': 'channel-url', 'url': 'url'}, 'Source text.', False, 'youtube', '', 4)]
+        self.assertEqual(events[-1]['stage'], 'done')
+        self.assertIn('import_selected_model: "' + model + '"', events[-1]['content'])
+        self.assertIn('import_model: "' + model + '"', events[-1]['content'])
+        self.assertEqual(stream.call_args.args[0], model)
+
     def test_extended_cloud_is_chunked_for_proportional_detail(self):
         self.assertTrue(main._chunk_plan(main.SONNET, 'youtube', True, 150000, 0, 0, False)[0])
 
