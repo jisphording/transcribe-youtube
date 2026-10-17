@@ -30,6 +30,11 @@ class AntigravityTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "did not complete"):
             antigravity._terminal_result([{"event": "result", "result": {"status": "ERROR"}}])
 
+    def test_quota_errors_are_actionable_and_do_not_expose_cli_payload(self):
+        with self.assertRaisesRegex(RuntimeError, "quota or rate limit"):
+            antigravity._terminal_result([{"event": "result", "result": {
+                "status": "ERROR", "error": "RESOURCE_EXHAUSTED private diagnostic"}}])
+
     @patch.object(antigravity.os, "uname")
     @patch.object(antigravity.subprocess, "Popen")
     def test_argv_stdin_environment_and_isolation(self, popen, uname):
@@ -102,8 +107,61 @@ class AntigravityTests(unittest.TestCase):
                     patch.object(antigravity, "TIMEOUT", 1):
                 with self.assertRaisesRegex(RuntimeError, "timed out"):
                     antigravity._run("system", "source")
-            killpg.assert_called_once_with(44, antigravity.signal.SIGTERM)
+            self.assertTrue(any(call.args == (44, antigravity.signal.SIGTERM) for call in killpg.call_args_list))
+            self.assertTrue(any(call.args == (44, antigravity.signal.SIGKILL) for call in killpg.call_args_list))
             self.assertEqual(child.waits, 2)
+
+    def test_process_group_cleanup_escalates_after_deadline(self):
+        calls = []
+        def killpg(pid, sig):
+            calls.append((pid, sig))
+        with patch.object(antigravity.os, 'killpg', side_effect=killpg), \
+             patch.object(antigravity.time, 'monotonic', side_effect=[0, 1]), \
+             patch.object(antigravity.time, 'sleep'):
+            antigravity._terminate_process_group(51, grace=0.5)
+        self.assertEqual(calls, [(51, antigravity.signal.SIGTERM), (51, antigravity.signal.SIGKILL)])
+
+    @patch.object(antigravity.os, "uname")
+    @patch.object(antigravity.subprocess, "Popen")
+    def test_malformed_child_output_is_rejected(self, popen, uname):
+        uname.return_value.sysname = "Darwin"
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "agy"
+            exe.write_text("fixture")
+            class Child:
+                pid = 123
+                returncode = 0
+                stdout = io.BytesIO(b"not-json\\n")
+                stderr = io.BytesIO()
+                stdin = io.BytesIO()
+                def wait(self, timeout): return 0
+                def poll(self): return 0
+            popen.return_value = Child()
+            with patch.dict(os.environ, {"ANTIGRAVITY_CLI_PATH": str(exe)}, clear=False), \
+                    patch.object(antigravity, "_terminate_process_group"):
+                with self.assertRaisesRegex(RuntimeError, "malformed stream JSON"):
+                    antigravity._run("system", "source")
+
+    @patch.object(antigravity.os, "uname")
+    @patch.object(antigravity.subprocess, "Popen")
+    def test_stderr_pressure_is_bounded_and_reported(self, popen, uname):
+        uname.return_value.sysname = "Darwin"
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "agy"
+            exe.write_text("fixture")
+            class Child:
+                pid = 123
+                returncode = 0
+                stdout = io.BytesIO()
+                stderr = io.BytesIO(b"x" * 1024)
+                stdin = io.BytesIO()
+                def wait(self, timeout): return 0
+                def poll(self): return 0
+            popen.return_value = Child()
+            with patch.dict(os.environ, {"ANTIGRAVITY_CLI_PATH": str(exe)}, clear=False), \
+                    patch.object(antigravity, "MAX_OUTPUT", 128):
+                with self.assertRaisesRegex(RuntimeError, "output exceeded"):
+                    antigravity._run("system", "source")
 
 
 if __name__ == "__main__":

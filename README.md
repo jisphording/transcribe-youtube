@@ -343,7 +343,7 @@ In plugin settings choose **Antigravity subscription** to process captions and t
 4. Pick a model from your configured AI provider
 5. For videos and podcast episodes, click **Add to queue** (or press Enter). The modal closes and the **Import queue** sidebar opens immediately; you can add another URL while the current item runs. Articles use **Import** and open the resulting note automatically.
 
-Queued notes are saved automatically; click a completed item in the sidebar to open its note. Videos over ~90 minutes start getting unreliable (YouTube rate-limits, transcripts truncate); Long cleaned transcripts are split into chunks; summary-only modes use a single model request. Podcasts of any length work, but whisper transcription scales linearly with duration (~3–5 min per hour on M-series).
+Queued notes are saved automatically; click a completed item in the sidebar to open its note. Long cleaned transcripts are split into chunks. Antigravity uses conservative 12,000-character source segments in every output mode because its subscription CLI does not publish a dependable context limit; a failed segment fails the import before any note or resource stub is written. Summary-only imports can still use one request for shorter transcripts. Videos over ~90 minutes can remain subject to YouTube rate limits or transcript availability. Podcasts of any length work, but whisper transcription scales linearly with duration (~3–5 min per hour on M-series).
 
 ### Batch import (channels, playlists, podcast shows)
 

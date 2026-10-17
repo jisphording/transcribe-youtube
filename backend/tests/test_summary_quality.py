@@ -35,6 +35,14 @@ class SummaryQualityTests(unittest.TestCase):
     def test_extended_cloud_is_chunked_for_proportional_detail(self):
         self.assertTrue(main._chunk_plan(main.SONNET, 'youtube', True, 150000, 0, 0, False)[0])
 
+    def test_antigravity_uses_conservative_chunk_limit_in_all_modes(self):
+        model = 'antigravity:gemini-3.8-flash-medium'
+        for extended in (False, True):
+            chunked, size = main._chunk_plan(model, 'youtube', extended,
+                                              main.antigravity.MAX_TRANSCRIPT_CHARS + 1, 0, 0, False)
+            self.assertTrue(chunked)
+            self.assertEqual(size, main.antigravity.MAX_TRANSCRIPT_CHARS)
+
     def test_local_extended_prompt_does_not_request_one_sentence(self):
         prompt = main._local_chunk_system(True, True, True)
         self.assertIn('40-60%', prompt)
@@ -94,6 +102,30 @@ class SummaryQualityTests(unittest.TestCase):
         self.assertEqual(events[-1]['resources'][0]['name'], 'Obsidian')
         self.assertIn('Last point', stream.call_args.args[2])
         self.assertEqual(next(e for e in events if e['stage'] == 'claude_done')['cost_usd'], 0.003)
+
+    def test_long_antigravity_notes_only_keeps_final_segment_and_grounded_resources(self):
+        model = 'antigravity:gemini-3.8-flash-medium'
+        chunks = ['First source ' * 100, 'I use Obsidian. Final source ' * 100 + 'LAST_SEGMENT_EVIDENCE']
+        sections = [
+            {'heading': 'First', 'summary': 'First point', 'transcript': ''},
+            {'heading': 'Last', 'summary': 'Final point', 'transcript': '',
+             'resources': [{'name': 'Obsidian', 'type': 'software', 'mention': 'I use Obsidian.'}]},
+            {'summary': 'Executive summary', 'topics': []},
+        ]
+        req = TranscriptRequest(url='url', model=model, extended_model=model, include_transcript=False,
+                                extract_resources=True)
+        with patch.object(main, '_chunk_plan', return_value=(True, 100)), \
+             patch.object(main, '_split_transcript', return_value=chunks), \
+             patch.object(main, '_stream_llm', side_effect=[iter([done(s)]) for s in sections]) as stream, \
+             patch.object(main, 'build_obsidian_note', return_value=('note.md', 'note')) as build:
+            events = [json.loads(event) for event in main._run_claude_and_note(
+                req, {'title': 'Title', 'channel': 'Channel'}, '\n'.join(chunks), False, 'youtube', '', 4)]
+        self.assertEqual(events[-1]['stage'], 'done')
+        self.assertEqual(events[-1]['resources'][0]['name'], 'Obsidian')
+        self.assertIn('LAST_SEGMENT_EVIDENCE', stream.call_args_list[1].args[2])
+        self.assertIn('Final point', stream.call_args.args[2])
+        self.assertEqual(build.call_args.args[2], '')
+        self.assertFalse(build.call_args.kwargs['include_transcript'])
 
     def test_resources_reject_partial_names_and_invented_evidence(self):
         resources = [

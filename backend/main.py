@@ -331,6 +331,10 @@ def _chunk_plan(
     """Decide whether to chunk and how many transcript chars go into one chunk."""
     if source == "web":
         return False, 0
+    if antigravity.is_antigravity(model):
+        # The subscription CLI does not publish a dependable context/output
+        # ceiling. Use a conservative input bound for every output mode.
+        return transcript_chars > antigravity.MAX_TRANSCRIPT_CHARS, antigravity.MAX_TRANSCRIPT_CHARS
     if use_extended_model and not local_llm.is_local(model):
         return transcript_chars > _EXTENDED_CHUNK_CHARS, _EXTENDED_CHUNK_CHARS
     if not local_llm.is_local(model):
@@ -1060,7 +1064,7 @@ def _run_claude_and_note(
             resources = [r for s in cloud_sections for r in (s.get("resources") or [])] if request.extract_resources else []
             extended_summary = "\n\n".join(s.get("extended_summary", "") for s in cloud_sections) if include_extended_in_chunks else ""
             focused_summary = "\n\n".join(s.get("focused_summary", "") for s in cloud_sections) if request.focus_topic else ""
-        transcript_md = combined_cleaned
+        transcript_md = combined_cleaned if request.include_transcript else ""
         article_info = None
 
     else:

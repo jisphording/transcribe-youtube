@@ -123,6 +123,12 @@ With `--json-schema`, documented output includes `structured_output`; an earlier
 
 Contained harmless usage: input 2063, output 87, thinking 72, total 2150. Adversarial: input 5106, output 1891, thinking 1470, total 6997. Results report token usage, not dollar cost, remaining quota or unlimited entitlement. Session counters can be cumulative; do not add per-step and terminal totals together. The backend's existing numeric cost interfaces may use zero incremental API cost, with subscription-quota labeling rather than “free.”
 
+## Long imports and process cleanup
+
+Long Antigravity imports use the existing source-aware chunk/reduce pipeline with a conservative 12,000-character source-segment limit in every output mode. The subscription CLI's context and output ceilings remain unpublished, so this is an application safety bound rather than a claimed model limit. Segment results are combined only after every segment and the final summary succeed; notes-only imports omit transcript output, and resource names/excerpts are validated against the original source before note assembly. A failed segment produces an actionable error and does not write a note or resource stub.
+
+The provider drains stdout and stderr concurrently with an 8 MB cap per stream, reports bounded overflow, and terminates/reaps the process group on timeout, malformed output, early stream termination, or normal completion with surviving descendants. Timeout cleanup escalates from SIGTERM to SIGKILL; the independent process deadline also bounds work running in the queue's thread after async cancellation. CLI terminal errors classify quota/rate-limit, authentication and unavailable-model failures without exposing raw CLI diagnostics or retrying through a paid provider.
+
 ## Errors, retention and unverified limits
 
 Observed startup failures: blocking `/usr/bin/security` gives exit 1, ERROR, `authentication failed or timed out`, num_turns=0, zero usage; permitting the helper resolves it. Denying project metadata prevents conversation startup; read-only metadata access resolves it. Denying home metadata breaks native certificate initialization (`SecPolicyCreateSSL` eligibility TLS error); allowing metadata resolves it without allowing user-file contents or disabling TLS verification. Invalid Seatbelt syntax gives exit 65 and never starts the CLI. No failed startup counts as an isolation/generation pass.

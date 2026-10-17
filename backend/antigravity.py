@@ -15,6 +15,10 @@ MODEL = "gemini-3.8-flash-medium"
 MODEL_ID = PREFIX + MODEL
 TIMEOUT = int(os.environ.get("ANTIGRAVITY_TIMEOUT_SECONDS", "600"))
 MAX_OUTPUT = 8_000_000
+# Subscription CLI limits are not documented as Gemini API context limits. Keep
+# each request deliberately small; long transcripts are handled by main.py's
+# existing source-aware chunk/reduce pipeline.
+MAX_TRANSCRIPT_CHARS = 12_000
 
 
 def is_antigravity(model: str | None) -> bool:
@@ -33,11 +37,39 @@ def _terminal_result(events: list[dict]) -> tuple[str, dict]:
         raise RuntimeError("Antigravity stream ended without a terminal result.")
     final = finals[-1]
     if final.get("status") != "SUCCESS":
-        raise RuntimeError("Antigravity did not complete successfully.")
+        detail = " ".join(str(final.get(key, "")) for key in ("status", "error", "message")).lower()
+        if any(word in detail for word in ("quota", "rate limit", "resource exhausted", "resource_exhausted", "too many requests")):
+            message = "Antigravity subscription quota or rate limit reached; retry explicitly after access is available."
+        elif any(word in detail for word in ("auth", "login", "unauthorized", "credential")):
+            message = "Antigravity authentication failed or expired; sign in to the CLI and retry."
+        elif any(word in detail for word in ("model", "not found", "unavailable")):
+            message = "The configured Antigravity model is unavailable; verify the signed-in account's model access."
+        else:
+            message = "Antigravity did not complete successfully."
+        raise RuntimeError(message)
     response = final.get("structured_output") or final.get("response")
     if not isinstance(response, str) or not response.strip():
         raise RuntimeError("Antigravity returned no result.")
     return response, final.get("usage") or final.get("stats") or {}
+
+
+def _terminate_process_group(pid: int, grace: float = 3.0) -> None:
+    """Stop surviving CLI descendants and escalate so inherited pipes cannot hang readers."""
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def _run(system_prompt: str, user_message: str) -> tuple[str, dict]:
@@ -122,6 +154,8 @@ Return only the requested JSON. No tools are available.
                     keep = chunk[:MAX_OUTPUT - size]
                     chunks.append(keep)
                     size += len(keep)
+                else:
+                    keep = b""
                 if size >= MAX_OUTPUT and len(chunk) > len(keep):
                     output["overflow"] = True
             output[name] = b"".join(chunks)
@@ -142,6 +176,7 @@ Return only the requested JSON. No tools are available.
             writer.start()
             process.wait(timeout=TIMEOUT)
             writer.join(timeout=2)
+            _terminate_process_group(process.pid, grace=0.2)
             for reader in readers:
                 reader.join(timeout=5)
             out = output["stdout"]
@@ -158,11 +193,11 @@ Return only the requested JSON. No tools are available.
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("Antigravity timed out.") from exc
         finally:
+            _terminate_process_group(process.pid, grace=0.2)
             if process.poll() is None:
                 try:
-                    os.killpg(process.pid, signal.SIGTERM)
                     process.wait(timeout=3)
-                except Exception:
+                except subprocess.TimeoutExpired:
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:

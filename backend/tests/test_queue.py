@@ -59,6 +59,56 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(seen[0].include_transcript)
         self.assertEqual((self.root / 'YouTube/router.md').read_text(), 'summary')
 
+    async def test_antigravity_options_survive_restart_retry_and_worker_dispatch(self):
+        model = 'antigravity:gemini-3.8-flash-medium'
+        req = QueueItemRequest(
+            url='https://podcasts.apple.com/us/podcast/test/id123?i=456',
+            options=BatchOptions(model=model, extended_model=model, extended_summary=True,
+                                 focus_topic='safety', focus_include_extended=True,
+                                 extract_resources=True, include_transcript=False),
+            vault_root=str(self.root), folders=self.folders, scan_roots=[str(self.root)],
+        )
+        batch = await main.queue_single(req)
+        queue.init_db()
+        item = queue.next_item(time.time())
+        queue._mark_running(item['id'])
+        queue._record_result(item, {'state': 'failed', 'error': 'quota', 'network': False})
+        self.assertEqual(queue.retry_failed(batch['id']), 1)
+        item = queue.next_item(time.time())
+        seen = []
+        def pipeline(request, steps):
+            seen.append(request)
+            yield json.dumps({'stage': 'done', 'filename': 'agy.md', 'content': 'complete', 'resources': []})
+        with patch.object(main, '_run_podcast_pipeline', pipeline):
+            result = main._process_batch_item(item, queue.get_batch(item['batch_id'], with_vault=True))
+        self.assertEqual(result['state'], 'done')
+        self.assertEqual(seen[0].model, model)
+        self.assertEqual(seen[0].extended_model, model)
+        self.assertEqual(seen[0].focus_topic, 'safety')
+        self.assertTrue(seen[0].focus_include_extended)
+        self.assertTrue(seen[0].extract_resources)
+        self.assertFalse(seen[0].include_transcript)
+
+    async def test_quota_failure_does_not_write_or_pause_youtube_lane(self):
+        model = 'antigravity:gemini-3.8-flash-medium'
+        req = QueueItemRequest(url='https://www.youtube.com/watch?v=abcdefghijk',
+            options=BatchOptions(model=model, extended_model=model), vault_root=str(self.root),
+            folders=self.folders, scan_roots=[str(self.root)])
+        batch = await main.queue_single(req)
+        item = batch['items'][0]
+        with patch.object(main, '_run_youtube_pipeline', return_value=iter([
+                json.dumps({'stage': 'error', 'message': 'Antigravity subscription quota reached.'})])), \
+             patch.object(main, '_stream_llm') as stream:
+            result = main._process_batch_item(item, queue.get_batch(item['batch_id'], with_vault=True))
+        stream.assert_not_called()
+        self.assertEqual(result['state'], 'failed')
+        self.assertFalse(result.get('blocked', False))
+        self.assertFalse((self.root / 'YouTube').exists())
+        queue._record_result(item, result)
+        lane = queue.lane_status()['youtube']
+        self.assertEqual(lane['blocked_until'], 0)
+        self.assertEqual(queue.get_batch(batch['id'])['items'][0]['state'], 'failed')
+
     async def test_worker_runs_single_video_and_podcast_serially_and_writes_notes(self):
         first = await self.enqueue()
         second = await self.enqueue('https://podcasts.apple.com/us/podcast/test/id123?i=456')
