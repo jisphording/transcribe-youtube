@@ -61,25 +61,35 @@ class SummaryQualityTests(unittest.TestCase):
         self.assertIn('formula.type', note)
         self.assertIn('## Executive Summary', note)
 
-    def test_extended_length_retries_and_accounts_for_both_calls(self):
-        with patch.object(main, '_stream_llm', side_effect=[iter([done({'extended_summary': 'too short'})]),
-                iter([done({'extended_summary': 'detail ' * 50})])]) as stream:
-            updates = list(main._stream_with_extended_target(main.SONNET, 'system', 'input', 'medium',
-                                                            'source ' * 100, 'extended_summary'))
-        self.assertEqual(stream.call_count, 2)
-        self.assertIn('previous extended summary had 2 words', stream.call_args.args[2])
-        self.assertEqual(updates[-1]['input_tokens'], 20)
-        self.assertEqual(updates[-1]['cost_usd'], 0.002)
+    def test_approximate_extended_length_is_accepted_without_retry(self):
+        model = 'antigravity:gemini-3.8-flash-medium'
+        for source_words, summary_words in ((2381, 1872), (100, 2), (100, 50)):
+            with self.subTest(source_words=source_words, summary_words=summary_words):
+                result = done({'extended_summary': 'detail ' * summary_words})
+                with patch.object(main, '_stream_llm', side_effect=lambda *args: iter([result])) as stream:
+                    updates = list(main._stream_with_extended_target(
+                        model, 'system', 'input', None, 'source ' * source_words, 'extended_summary'))
+                self.assertEqual(stream.call_count, 1)
+                self.assertEqual(updates[-1], result)
 
-    def test_persistently_short_extended_is_not_saved(self):
+    def test_short_extended_is_saved(self):
         req = TranscriptRequest(url='url', extended_summary=True, include_transcript=False)
-        with patch.object(main, '_stream_llm', side_effect=lambda *args: iter([done({'extended_summary': 'tiny'})])), \
-             patch.object(main, 'build_obsidian_note') as build:
+        with patch.object(main, '_stream_llm', side_effect=lambda *args: iter([done({'extended_summary': 'tiny'})])) as stream, \
+             patch.object(main, 'build_obsidian_note', return_value=('note.md', 'note')) as build:
             events = [json.loads(e) for e in main._run_claude_and_note(
                 req, {'title': 'Title', 'channel': 'Channel'}, 'source ' * 100, False, 'youtube', '', 4)]
-        self.assertEqual(events[-1]['stage'], 'error')
-        self.assertIn('after retry', events[-1]['message'])
-        build.assert_not_called()
+        self.assertEqual(events[-1]['stage'], 'done')
+        self.assertEqual(build.call_args.kwargs['extended_summary'], 'tiny')
+        self.assertEqual(stream.call_count, 1)
+
+    def test_actual_output_limit_still_rejects_incomplete_response(self):
+        for reason in ('max_tokens', 'length'):
+            with self.subTest(reason=reason):
+                result = {**done({'extended_summary': 'detail ' * 50}), 'stop_reason': reason}
+                with patch.object(main, '_stream_llm', return_value=iter([result])):
+                    with self.assertRaisesRegex(RuntimeError, 'output limit'):
+                        list(main._stream_with_extended_target(
+                            main.SONNET, 'system', 'input', None, 'source ' * 100, 'extended_summary'))
 
     def test_long_cloud_extended_preserves_last_segment_and_its_resources(self):
         chunks = ['first ' * 100, 'I use Obsidian. ' + 'last ' * 100]

@@ -487,45 +487,20 @@ def _stream_llm(model: str, system_prompt: str, user_message: str, effort: str |
 def _stream_with_extended_target(
     model: str, system: str, user: str, effort: str | None, source_text: str, extended_key: str,
 ):
-    """Retry one overly compressed/long abridgement; never silently save a tiny extended summary."""
-    source_words = len(source_text.split())
-    input_tokens = output_tokens = 0
-    cost = elapsed = 0.0
-    for attempt in range(2):
-        done = None
-        for update in _stream_llm(model, system, user, effort):
-            if update["type"] != "done":
-                yield update
-            else:
-                done = update
-        if done is None:
-            raise RuntimeError("The model stream ended without a response.")
-        if done.get("stop_reason") in ("max_tokens", "length"):
+    """Accept approximate summary lengths; reject responses stopped by an output limit."""
+    for update in _stream_llm(model, system, user, effort):
+        if update["type"] != "done":
+            yield update
+            continue
+        if update.get("stop_reason") in ("max_tokens", "length"):
             raise RuntimeError("The model hit its output limit; the response is incomplete.")
-        input_tokens += done["input_tokens"]
-        output_tokens += done["output_tokens"]
-        elapsed += done.get("elapsed", 0.0)
-        reported_cost = done.get("cost_usd")
-        cost += reported_cost if reported_cost is not None else _estimate_cost(model, done["input_tokens"], done["output_tokens"])
-        # Tiny inputs and refusals use the normal response/error path.
-        if extended_key and source_words >= 100 and done.get("stop_reason") != "refusal":
-            result = parse_claude_response(done["response"])
-            extended = result.get(extended_key, "")
-            words = len(extended.split()) if isinstance(extended, str) else 0
-            if not 0.4 <= words / source_words <= 0.6:
-                if attempt == 0:
-                    user += (
-                        f"\nYour previous extended summary had {words:,} words, outside the requested range. "
-                        + _extended_word_target(source_text)
-                        + " Regenerate the full JSON result. Preserve substantive content; do not pad with invented detail."
-                    )
-                    continue
-                raise RuntimeError(
-                    f"Extended summary has {words:,} words for {source_words:,} source words after retry "
-                    "(expected 40-60%). Try another model."
-                )
-        yield {**done, "input_tokens": input_tokens, "output_tokens": output_tokens, "elapsed": elapsed, "cost_usd": cost}
+        reported_cost = update.get("cost_usd")
+        cost = reported_cost if reported_cost is not None else _estimate_cost(
+            model, update["input_tokens"], update["output_tokens"]
+        )
+        yield {**update, "cost_usd": cost}
         return
+    raise RuntimeError("The model stream ended without a response.")
 
 
 def _estimate_cost(
