@@ -32,7 +32,7 @@ Each file has a single responsibility. Do not merge concerns across modules.
 | `whisper.py` | Local whisper-server HTTP client. Downloads audio → POSTs to `whisper-server` → returns transcript | — |
 | `web.py` | Web article fetch (HTML only — no images/scripts/linked pages), accessibility checks, main-text + metadata extraction via `trafilatura`, URL cleaning | — |
 | `openrouter.py` | Curated cloud model catalog, pricing, OpenRouter streaming with progress/done contract; `openrouter:` model IDs, reasoning disabled, cheapest compatible provider | — |
-| `antigravity.py` | Curated Antigravity subscription model and contained `agy` process; `antigravity:` IDs; macOS sandbox-exec required with no uncontained fallback | — |
+| `antigravity.py` | Curated Antigravity subscription model and contained `agy` process; fresh disposable workspace, absolute executable setting, finite timeout and bounded output; `antigravity:` IDs; macOS sandbox-exec required with no uncontained fallback | — |
 | `claude.py` | Claude API streaming, response parsing, model constants. Marks the system prompt with `cache_control` (caches on Opus 5.5; below the minimum on Haiku 4.5, mostly on Sonnet 5) and logs `claude usage: … cache_read=… cache_write=…` per call to stdout | — |
 | `local_llm.py` | Optional local LLM via an OpenAI-compatible server (`LOCAL_LLM_URL`, default MLX Core on `:11234`): `list_models()` (served models + installed ones under `LOCAL_LLM_MODELS_DIR`, each with a `status`), `stream_local()` with the same yield contract as `stream_claude()`. Model ids are prefixed `local:` | — |
 | `note.py` | Source-agnostic Obsidian markdown note assembly (YouTube + podcast variants, separate web article layout) | — |
@@ -50,7 +50,7 @@ Each file has a single responsibility. Do not merge concerns across modules.
 **Rules:**
 - `youtube.py`, `podcast.py`, `whisper.py`, `web.py`, `claude.py`, `openrouter.py`, `local_llm.py`, `note.py`, `cookies.py`, `vault.py` and `batch_queue.py` must NOT import from each other. They are independent modules orchestrated only by `main.py`.
 - `models.py` contains only Pydantic models — no logic.
-- Antigravity runs through `backend/antigravity.py` using the approved custom-agent and macOS sandbox contract in `docs/antigravity-cli-contract.md`. Configure `ANTIGRAVITY_CLI_PATH` and optional `ANTIGRAVITY_VAULT_PATHS`; requests consume signed-in subscription quota rather than API dollars.
+- Antigravity runs through `backend/antigravity.py` using the approved custom-agent and macOS sandbox contract in `docs/antigravity-cli-contract.md`. Configure an absolute `ANTIGRAVITY_CLI_PATH` because the LaunchAgent PATH omits `~/.local/bin`; optional `ANTIGRAVITY_TIMEOUT_SECONDS` defaults to 600 and `ANTIGRAVITY_VAULT_PATHS` lists additional denied vault paths. Requests consume signed-in subscription quota rather than API dollars, and transcript text is sent to Google.
 - Prompt modules expose only `ROLE_PREAMBLE`, `JSON_KEYS`, and `RULES` — no functions.
 - The prompt composer (`prompts.get_system_prompt`) takes a `source` argument (`"youtube"`, `"podcast"` or `"web"`) so the same feature flags work for all sources — the wording adapts. For `"web"` it swaps `base` for `article`.
 

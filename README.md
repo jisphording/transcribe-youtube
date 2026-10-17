@@ -330,7 +330,15 @@ tail -f /tmp/whisper-server.log /tmp/whisper-server.err  # logs
 
 ### Antigravity subscription model
 
-In plugin settings choose **Antigravity subscription** to process captions and transcripts with Gemini 3.8 Flash. This uses the signed-in Google account's subscription quota; the backend reports zero incremental API-dollar cost and does not describe that quota as unlimited or free. Install and sign in to the Antigravity CLI separately, then set the absolute `ANTIGRAVITY_CLI_PATH` in `backend/.env` (see `backend/.env.example`) and restart the backend. The provider is macOS-only and refuses to run if `sandbox-exec` containment is unavailable. Set `ANTIGRAVITY_VAULT_PATHS` to any vault paths that must be explicitly denied; the repository and `/Volumes` are denied by default. Imports never install, update, or log into the CLI.
+Antigravity sends transcript text to Google for Gemini 3.8 Flash processing. YouTube captions, podcast RSS transcripts and Whisper audio transcription still use the existing source flow; audio is not sent to Antigravity for transcription. This provider uses the signed-in Google account's subscription quota. The backend reports zero incremental API-dollar cost; quota is still consumed and is not unlimited or free. API keys do not select or authenticate this provider.
+
+1. Install the Antigravity CLI and sign in interactively as the macOS user that runs the backend LaunchAgent, following the [official CLI setup](https://antigravity.google/docs/install?tab=cli). Do not copy credentials into this project.
+2. Check `agy --version` and `agy models` in that account. The supported selection is Gemini 3.8 Flash (medium).
+3. Set `ANTIGRAVITY_CLI_PATH` in `backend/.env` to the absolute path of the executable. This is important because the LaunchAgent's PATH does not include `~/.local/bin`. Optionally set `ANTIGRAVITY_TIMEOUT_SECONDS` (default `600`) and `ANTIGRAVITY_VAULT_PATHS` (colon-separated absolute paths that must be denied; the repository and `/Volumes` are denied by default). See [`backend/.env.example`](backend/.env.example).
+4. Restart the backend with `./backend/scripts/stop.sh && ./backend/scripts/start.sh`, then check `./backend/scripts/check.sh` and `curl -fsS http://127.0.0.1:8000/health`.
+5. In **Settings → Media to Obsidian → AI provider**, choose **Antigravity subscription**, then select it for an import.
+
+The provider runs only on macOS and refuses to start if `sandbox-exec` containment is unavailable. Each call uses a fresh disposable workspace, a 600-second default process deadline and an 8 MB output limit per stream. Long transcripts use conservative 12,000-character source segments; these are application limits, not published Antigravity model limits. CLI failures, quota exhaustion and expired sign-in require an explicit operator retry; there is no fallback to a paid API provider. CLI sessions and diagnostics can persist in the user's Antigravity CLI data directory, and remote transcript retention is not established. Imports never install, update or log in to the CLI.
 
 ### Trigger the import
 - Click the audio-file icon in the left ribbon, **or**

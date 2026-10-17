@@ -1,6 +1,6 @@
 # Antigravity CLI integration contract
 
-**GO for contained provider use — 2026-10-17.** The user approved the tested OS-containment policy with a session-local `manage_task` bookkeeping exception. Subscription JSON generation, independent file/command denials and adversarial canaries pass. Phase 2 adds the provider behind this containment and verified it with a live short captioned YouTube pipeline run. LaunchAgent startup, vault-write/UI inspection, and long-import reliability remain later-phase checks.
+**GO for contained provider use — 2026-10-17.** The user approved the tested OS-containment policy with a session-local `manage_task` bookkeeping exception. Subscription JSON generation, independent file/command denials and adversarial canaries pass. Phase 2 verified a live short captioned YouTube pipeline run; Phase 3 verified contained long-mode and queued podcast fixture imports. Phase 4 service evidence is recorded in [antigravity-validation.md](antigravity-validation.md). At this validation, LaunchAgent startup and real Obsidian UI/vault checks remain pending because the backend agent was not loaded.
 
 ## Approved policy and scope
 
@@ -8,7 +8,7 @@ Every provider call must start a fresh `agy` subprocess in a disposable workspac
 
 The profile blocks transcript-driven shell execution, repository/vault content reads, workspace writes and inherited MCP/skill/hook/rule configuration. Session-local `manage_task` bookkeeping is permitted; only `Action=list` was tested. Other actions remain untested and must not be relied on or requested by the provider. This exception does not grant file access, command execution, other-conversation control or conversation reuse.
 
-The original literal zero-callable-tools criterion failed because `manage_task` executed. The user explicitly authorized revising that criterion with “please revise per recommendation to finalize the phase.” The revised phase, decision and revision ledger record the exception. Historical failures remain in the [verification history](../plan/02-antigravity-gemini-transcript-notes/evidence/01-verify-history.md) and [prior contract](../plan/02-antigravity-gemini-transcript-notes/evidence/01-contract-before-approval.md).
+The original literal zero-callable-tools criterion failed because `manage_task` executed. The user explicitly authorized revising that criterion with “please revise per recommendation to finalize the phase.” The revised criterion permits only the tested session-local bookkeeping exception; it retains the OS-level file and command boundaries described here.
 
 ## Tested installation and account
 
@@ -16,7 +16,7 @@ The original literal zero-callable-tools criterion failed because `manage_task` 
 - `agy models` exited 0 and listed `gemini-3.8-flash-low`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-high`. Pin `gemini-3.8-flash-medium`; do not silently select another model/provider.
 - Same-user probes ran as `jisphording`, uid 501, matching the backend's user LaunchAgent. The user confirmed personal Google AI Pro/Ultra sign-in. Successful key-free generation establishes account access; the tier is user-attested, not read from tokens.
 - Preserve the real HOME and ordinary OS/account environment. Remove names containing `API_KEY`, all `AGY_*`, `ANTIGRAVITY_*`, `GEMINI_*` and `GOOGLE_GENAI_USE_*` overrides, plus `GOOGLE_APPLICATION_CREDENTIALS` and `GOOGLE_GEMINI_BASE_URL`, as in the tested probe. Do not copy tokens or read credential contents. The CLI itself uses the OS Keychain helper normally.
-- Launchd prerequisites: the same user's cached sign-in/Keychain session, network and loopback IPC, writable CLI runtime/log storage, an absolute CLI path and disposable cwd. The service PATH omits `~/.local/bin`; shell success does not prove launchd access. No service/plist modification was made.
+- Launchd prerequisites: the same user's cached sign-in/Keychain session, network and loopback IPC, writable CLI runtime/log storage, an absolute CLI path and disposable cwd. The service PATH omits `~/.local/bin`; shell success does not prove launchd access. `backend/.env.example` documents `ANTIGRAVITY_CLI_PATH`, `ANTIGRAVITY_TIMEOUT_SECONDS` (default 600) and optional colon-separated `ANTIGRAVITY_VAULT_PATHS`. No service/plist modification was made during Phase 4 validation.
 
 ## Exact invocation and fixtures
 
@@ -56,7 +56,7 @@ commandExecutionPolicy: off
 Process supplied text and return JSON. No tools are available.
 ```
 
-The tested full-process profile (also saved as [01-contained-profile.sb](../plan/02-antigravity-gemini-transcript-notes/evidence/01-contained-profile.sb)):
+The tested full-process profile:
 
 ```scheme
 (version 1)
@@ -113,7 +113,7 @@ The contained subscription probe returns valid JSON without API keys.
 
 The native probes independently enforce file and command denial; a model refusal or absent sentinel alone is insufficient. Hook/MCP fixtures request only harmless temporary canaries and are unreadable under the CLI profile. Skills/rules/plugins are excluded through custom-agent lists plus denied configuration sources. No real vault contents were requested; the vault test uses a disposable fixture. Phase 2 explicitly denies the repository and `/Volumes`, plus any `ANTIGRAVITY_VAULT_PATHS` configured for the service user; Phase 4 remains responsible for launchd and other service-specific locations.
 
-Reproduction: run [01-contained-probe.py](../plan/02-antigravity-gemini-transcript-notes/evidence/01-contained-probe.py) from the repo root under the same user with runtime/network access. Its output is an investigation record; validate each result, not merely the script exit. Saved evidence: [observations](../plan/02-antigravity-gemini-transcript-notes/evidence/01-contained-observation.json), [harmless stream](../plan/02-antigravity-gemini-transcript-notes/evidence/01-contained-agy.ndjson), [adversarial stream](../plan/02-antigravity-gemini-transcript-notes/evidence/01-contained-adversarial.ndjson). The fixture script is machine-specific; it is not the production launcher.
+Reproduction requires a fresh disposable probe directory, the invocation and agent above, and an instantiated version of the profile with local absolute paths. Validate terminal status, JSON, native denial probes and adversarial canaries individually; a process exit alone is insufficient. The machine-specific probe used during validation is not the production launcher.
 
 ## Stream, JSON and usage contract
 
@@ -133,9 +133,9 @@ The provider drains stdout and stderr concurrently with an 8 MB cap per stream, 
 
 Observed startup failures: blocking `/usr/bin/security` gives exit 1, ERROR, `authentication failed or timed out`, num_turns=0, zero usage; permitting the helper resolves it. Denying project metadata prevents conversation startup; read-only metadata access resolves it. Denying home metadata breaks native certificate initialization (`SecPolicyCreateSSL` eligibility TLS error); allowing metadata resolves it without allowing user-file contents or disabling TLS verification. Invalid Seatbelt syntax gives exit 65 and never starts the CLI. No failed startup counts as an isolation/generation pass.
 
-Quota exhaustion was not induced. Exact quota-error payloads, model context/output ceilings and live timeout/child escalation remain unmeasured; preserve explicit error handling and fixture tests in later phases. CLI auto-update writes are denied, and imports must not install/update/login.
+Quota exhaustion was not induced. Exact quota-error payloads, model context/output ceilings and live timeout/child escalation remain unmeasured; preserve explicit error handling and fixture tests in later phases. The app applies a 600-second default process deadline, an 8 MB cap per output stream and 12,000-character source segments; these are conservative application bounds, not published CLI/model limits. CLI auto-update writes are denied, and imports must not install/update/login.
 
-CLI runtime sessions and raw diagnostics persist outside the disposable cwd. The profile blocks history-file reads and resume flags are omitted; this does not delete stored sessions. Raw logs and credentials were not copied into the repo; saved streams redact conversation IDs and temporary roots. Remote transcript retention is not established. Phase 4 must document service-originated access and operator retention behavior without claiming zero retention.
+CLI runtime sessions and raw diagnostics persist outside the disposable cwd. The profile blocks history-file reads and resume flags are omitted; this does not delete stored sessions. Raw logs and credentials were not copied into the repo; saved streams redact conversation IDs and temporary roots. Remote transcript retention is not established. Transcript text is sent to Google for model processing; do not describe the provider as zero-retention.
 
 ## Rejected candidates and references
 
