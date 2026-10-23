@@ -338,6 +338,8 @@ Antigravity sends transcript text to Google for Gemini 3.8 Flash processing. You
 4. Restart the backend with `./backend/scripts/stop.sh && ./backend/scripts/start.sh`, then check `./backend/scripts/check.sh` and `curl -fsS http://127.0.0.1:8000/health`.
 5. In **Settings → Media to Obsidian → AI provider**, choose **Antigravity subscription**, then select it for an import.
 
+Homebrew executable symlinks such as `/opt/homebrew/bin/agy` are supported: the backend resolves the target before launching it and constructing the sandbox execution allowlist. Other local servers can coexist when their published host ports differ; the native backend uses `127.0.0.1:8000`. The legacy Docker Compose service also publishes port 8000, so stop it before running the native backend.
+
 The provider runs only on macOS and refuses to start if `sandbox-exec` containment is unavailable. Each call uses a fresh disposable workspace, a 600-second default process deadline and an 8 MB output limit per stream. Long transcripts use conservative 12,000-character source segments; these are application limits, not published Antigravity model limits. CLI failures, quota exhaustion and expired sign-in require an explicit operator retry; there is no fallback to a paid API provider. CLI sessions and diagnostics can persist in the user's Antigravity CLI data directory, and remote transcript retention is not established. Imports never install, update or log in to the CLI.
 
 ### Trigger the import

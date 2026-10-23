@@ -79,6 +79,32 @@ class AntigravityTests(unittest.TestCase):
         self.assertEqual(updates[-1]["thinking_tokens"], 2)
         self.assertEqual(updates[-1]["cache_read_tokens"], 1)
 
+    def test_symlinked_cli_uses_real_executable_in_sandbox_and_argv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp).resolve() / "antigravity"
+            executable.write_text("fixture")
+            link = executable.parent / "agy"
+            link.symlink_to(executable)
+            captured = {}
+
+            def start(argv, **kwargs):
+                captured["argv"] = argv
+                captured["profile"] = Path(argv[2]).read_text()
+                child = unittest.mock.Mock(pid=123, returncode=0)
+                child.stdin = io.BytesIO()
+                child.stdout = io.BytesIO(b'{"event":"result","result":{"status":"SUCCESS","response":"{}"}}\n')
+                child.stderr = io.BytesIO()
+                return child
+
+            with patch.dict(os.environ, {"ANTIGRAVITY_CLI_PATH": str(link)}), \
+                    patch.object(antigravity.subprocess, "Popen", side_effect=start), \
+                    patch.object(antigravity, "_terminate_process_group"):
+                antigravity._run("system", "source")
+
+            self.assertEqual(captured["argv"][3], str(executable))
+            self.assertIn(f'(literal "{executable}")', captured["profile"])
+            self.assertNotIn(f'(literal "{link}")', captured["profile"])
+
     @patch.object(antigravity.os, "killpg")
     @patch.object(antigravity.os, "uname")
     @patch.object(antigravity.subprocess, "Popen")

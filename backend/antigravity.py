@@ -53,6 +53,39 @@ def _terminal_result(events: list[dict]) -> tuple[str, dict]:
     return response, final.get("usage") or final.get("stats") or {}
 
 
+def _cli_error_detail(events: list[dict], stderr: bytes, returncode: int) -> str:
+    """Turn CLI failure envelopes and diagnostics into safe, actionable messages."""
+    diagnostic = stderr.decode(errors="replace").lower()
+    finals = [
+        event.get("result", event) for event in events
+        if event.get("event") == "result" or event.get("type") == "result"
+    ]
+    if finals:
+        final = finals[-1]
+        diagnostic += " " + " ".join(str(final.get(key, "")) for key in ("status", "error", "message")).lower()
+
+    quota_terms = ("quota", "rate limit", "resource exhausted", "resource_exhausted", "too many requests")
+    if any(term in diagnostic for term in quota_terms):
+        return "Antigravity subscription quota or rate limit reached; retry explicitly after access is available."
+    if any(term in diagnostic for term in ("auth", "login", "unauthorized", "credential", "keychain")):
+        return "Antigravity authentication failed or expired; sign in to the CLI and retry."
+    if any(term in diagnostic for term in ("model", "not found", "unavailable")):
+        return "The configured Antigravity model is unavailable; verify the signed-in account's model access."
+    if any(term in diagnostic for term in ("sandbox", "operation not permitted", "permission denied")):
+        return "Antigravity could not start inside the required macOS sandbox; check system permissions and retry."
+    if any(term in diagnostic for term in ("network", "connection", "tls", "certificate")):
+        return "Antigravity could not reach its service; check network access and retry."
+    if not finals:
+        return (
+            f"Antigravity CLI failed (exit {returncode}) without a terminal result. "
+            "Check the local CLI diagnostics and retry."
+        )
+    return (
+        f"Antigravity CLI failed (exit {returncode}) with an unclassified error. "
+        "Check the local CLI diagnostics and retry."
+    )
+
+
 def _terminate_process_group(pid: int, grace: float = 3.0) -> None:
     """Stop surviving CLI descendants and escalate so inherited pipes cannot hang readers."""
     try:
@@ -76,6 +109,9 @@ def _run(system_prompt: str, user_message: str) -> tuple[str, dict]:
     executable = os.environ.get("ANTIGRAVITY_CLI_PATH", "").strip() or shutil.which("agy") or str(Path.home() / ".local/bin/agy")
     if not Path(executable).is_absolute() or not Path(executable).is_file():
         raise RuntimeError("Set ANTIGRAVITY_CLI_PATH to the absolute path of the installed agy executable.")
+    # Seatbelt checks the symlink target for process-exec (e.g. Homebrew's agy).
+    # Use the same canonical path for execution and every sandbox exception.
+    executable = str(Path(executable).resolve())
     if os.uname().sysname != "Darwin" or not Path("/usr/bin/sandbox-exec").is_file():
         raise RuntimeError("macOS sandbox-exec is required; refusing an uncontained Antigravity process.")
     repo = Path(__file__).resolve().parents[1]
@@ -183,12 +219,14 @@ Return only the requested JSON. No tools are available.
             err = output["stderr"]
             if output["overflow"]:
                 raise RuntimeError("Antigravity output exceeded the configured limit.")
-            if process.returncode:
-                raise RuntimeError(f"Antigravity CLI failed (exit {process.returncode}).")
             try:
                 events = [json.loads(line) for line in out.decode().splitlines() if line.strip()]
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                if process.returncode:
+                    raise RuntimeError(_cli_error_detail([], err, process.returncode)) from exc
                 raise RuntimeError("Antigravity returned malformed stream JSON.") from exc
+            if process.returncode:
+                raise RuntimeError(_cli_error_detail(events, err, process.returncode))
             return _terminal_result(events)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("Antigravity timed out.") from exc

@@ -95,6 +95,8 @@ The tested full-process profile:
 
 Necessary exceptions: CLI runtime reads/writes and one explicit log; read-only CLI project metadata; Keychain/preferences reads; home-file metadata needed by native certificate validation; execution of `agy` and `/usr/bin/security` only. The native diagnostic profile additionally allows its test interpreter; the CLI profile does not. TLS verification remains enabled. Global settings/customization paths remain denied even within the otherwise allowed runtime store. Model networking and ordinary OS services remain available; this is not a destination allowlist or a no-retention policy.
 
+Executable paths must be canonicalized before profile construction and invocation. macOS checks a symlink's resolved target for `process-exec`; allowing only `/opt/homebrew/bin/agy` fails with `sandbox-exec: execvp() ... Operation not permitted`. The backend resolves both configured and PATH-discovered executables and uses that target for the process-exec and home-content-read exceptions as well as argv. This preserves the execution boundary while supporting Homebrew symlinks. See [the startup debug record](../plan/debug-antigravity-startup.md).
+
 ## Observed generation and isolation results
 
 The contained subscription probe returns valid JSON without API keys.
@@ -127,7 +129,7 @@ Contained harmless usage: input 2063, output 87, thinking 72, total 2150. Advers
 
 Long Antigravity imports use the existing source-aware chunk/reduce pipeline with a conservative 12,000-character source-segment limit in every output mode. The subscription CLI's context and output ceilings remain unpublished, so this is an application safety bound rather than a claimed model limit. Segment results are combined only after every segment and the final summary succeed; notes-only imports omit transcript output, and resource names/excerpts are validated against the original source before note assembly. A failed segment produces an actionable error and does not write a note or resource stub.
 
-The provider drains stdout and stderr concurrently with an 8 MB cap per stream, reports bounded overflow, and terminates/reaps the process group on timeout, malformed output, early stream termination, or normal completion with surviving descendants. Timeout cleanup escalates from SIGTERM to SIGKILL; the independent process deadline also bounds work running in the queue's thread after async cancellation. CLI terminal errors classify quota/rate-limit, authentication and unavailable-model failures without exposing raw CLI diagnostics or retrying through a paid provider.
+The provider drains stdout and stderr concurrently with an 8 MB cap per stream, reports bounded overflow, and terminates/reaps the process group on timeout, malformed output, early stream termination, or normal completion with surviving descendants. Timeout cleanup escalates from SIGTERM to SIGKILL; the independent process deadline also bounds work running in the queue's thread after async cancellation. CLI terminal errors classify quota/rate-limit, authentication, unavailable-model, sandbox and network failures from the structured result or stderr without exposing raw CLI diagnostics or retrying through a paid provider. Non-zero exits without a recognized cause retain the exit code and direct the operator to local CLI diagnostics.
 
 ## Errors, retention and unverified limits
 
