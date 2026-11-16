@@ -27,6 +27,31 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
     async def enqueue(self, url='https://www.youtube.com/watch?v=abcdefghijk'):
         return await main.queue_single(QueueItemRequest(url=url, vault_root=str(self.root), folders=self.folders, scan_roots=[str(self.root)]))
 
+    def test_db_connections_are_closed(self):
+        queue.lane_status(); queue.list_batches(); queue.next_item(time.time())
+        before = len(os.listdir('/dev/fd'))
+        for _ in range(500):
+            queue.lane_status()
+            queue.list_batches()
+            queue.next_item(time.time())
+        self.assertLessEqual(len(os.listdir('/dev/fd')) - before, 5)
+
+    def test_db_rolls_back_on_error_and_closes(self):
+        conns = []
+        real = queue._connect
+        def spy():
+            conns.append(real())
+            return conns[-1]
+        with patch.object(queue, '_connect', spy):
+            with self.assertRaises(RuntimeError):
+                with queue._db() as conn:
+                    conn.execute("INSERT INTO lanes(name) VALUES ('ghost')")
+                    raise RuntimeError('boom')
+        with queue._db() as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM lanes WHERE name='ghost'").fetchone())
+        with self.assertRaises(Exception):
+            conns[0].execute("SELECT 1")
+
     async def test_single_imports_are_immediately_queued_in_fifo_order(self):
         first = await self.enqueue()
         second = await self.enqueue('https://podcasts.apple.com/us/podcast/test/id123?i=456')

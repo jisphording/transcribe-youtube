@@ -7,6 +7,7 @@ pending on the next start. Independent: the per-item work is injected by `main.p
 """
 
 import asyncio
+from contextlib import contextmanager
 import json
 import random
 import sqlite3
@@ -14,7 +15,7 @@ import time
 import traceback
 import uuid
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 
 DB_PATH = Path(__file__).parent / "data" / "batch.db"
@@ -79,9 +80,19 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def _db() -> Iterator[sqlite3.Connection]:
+    conn = _connect()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with _connect() as conn:
+    with _db() as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
         if "hidden" not in {r[1] for r in conn.execute("PRAGMA table_info(batches)")}:
@@ -106,7 +117,7 @@ def create_batch(
     options: dict, vault: dict, estimate: dict, items: list[dict],
 ) -> str:
     batch_id = uuid.uuid4().hex[:12]
-    with _connect() as conn:
+    with _db() as conn:
         conn.execute(
             "INSERT INTO batches(id,created_at,state,source,source_url,title,options_json,vault_json,estimate_json) VALUES (?,?,?,?,?,?,?,?,?)",
             (batch_id, time.time(), "pending_confirmation", source, source_url, title,
@@ -123,7 +134,7 @@ def create_batch(
 
 def expire_unconfirmed() -> None:
     cutoff = time.time() - CONFIRM_TIMEOUT_SECONDS
-    with _connect() as conn:
+    with _db() as conn:
         conn.execute(
             "UPDATE items SET state='cancelled' WHERE state='pending' AND batch_id IN "
             "(SELECT id FROM batches WHERE state='pending_confirmation' AND created_at < ?)", (cutoff,))
@@ -133,7 +144,7 @@ def expire_unconfirmed() -> None:
 
 def confirm(batch_id: str) -> bool:
     expire_unconfirmed()
-    with _connect() as conn:
+    with _db() as conn:
         ok = conn.execute(
             "UPDATE batches SET state='queued', hidden=0 WHERE id=? AND state='pending_confirmation'", (batch_id,)
         ).rowcount == 1
@@ -144,7 +155,7 @@ def confirm(batch_id: str) -> bool:
 
 def cancel(batch_id: str) -> bool:
     """Pending items are cancelled; a running item finishes normally."""
-    with _connect() as conn:
+    with _db() as conn:
         ok = conn.execute(
             "UPDATE batches SET state='cancelled' WHERE id=? AND state IN ('pending_confirmation','queued')",
             (batch_id,),
@@ -154,7 +165,7 @@ def cancel(batch_id: str) -> bool:
 
 
 def retry_failed(batch_id: str) -> int:
-    with _connect() as conn:
+    with _db() as conn:
         n = conn.execute(
             "UPDATE items SET state='pending', error=NULL, started_at=NULL, finished_at=NULL"
             " WHERE batch_id=? AND state='failed'", (batch_id,)).rowcount
@@ -186,7 +197,7 @@ def _batch_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
 
 
 def get_batch(batch_id: str, with_vault: bool = False) -> dict | None:
-    with _connect() as conn:
+    with _db() as conn:
         row = conn.execute("SELECT * FROM batches WHERE id=?", (batch_id,)).fetchone()
         if row is None:
             return None
@@ -198,7 +209,7 @@ def get_batch(batch_id: str, with_vault: bool = False) -> dict | None:
 
 def list_batches(limit: int = 10) -> list[dict]:
     expire_unconfirmed()
-    with _connect() as conn:
+    with _db() as conn:
         # Active work must stay visible even when there are many newer previews.
         rows = conn.execute(
             "SELECT * FROM batches WHERE hidden=0 AND (state='queued' OR (state != 'expired' AND id IN "
@@ -212,7 +223,7 @@ def list_batches(limit: int = 10) -> list[dict]:
 
 def remove_finished(batch_id: str | None = None) -> int:
     """Hide finished history, preserving notes and the hourly pacing ledger."""
-    with _connect() as conn:
+    with _db() as conn:
         rows = conn.execute(
             "SELECT id FROM batches WHERE hidden=0 AND state IN ('done','cancelled','expired') "
             "AND NOT EXISTS (SELECT 1 FROM items WHERE batch_id=batches.id "
@@ -228,7 +239,7 @@ def remove_finished(batch_id: str | None = None) -> int:
 
 def youtube_done_last_hour(now: float | None = None) -> int:
     since = (now or time.time()) - 3600
-    with _connect() as conn:
+    with _db() as conn:
         return conn.execute(
             "SELECT COUNT(*) FROM items WHERE source='youtube' AND finished_at > ?"
             " AND state IN ('done','skipped','failed')", (since,)).fetchone()[0]
@@ -236,7 +247,7 @@ def youtube_done_last_hour(now: float | None = None) -> int:
 
 def lane_status() -> dict:
     now = time.time()
-    with _connect() as conn:
+    with _db() as conn:
         lanes = {r["name"]: dict(r) for r in conn.execute("SELECT * FROM lanes")}
     lanes["youtube"]["done_last_hour"] = youtube_done_last_hour(now)
     lanes["youtube"]["hourly_cap"] = YOUTUBE_HOURLY_CAP
@@ -263,7 +274,7 @@ def next_item(now: float) -> dict | None:
     if not lanes:
         return None
     marks = ",".join("?" * len(lanes))
-    with _connect() as conn:
+    with _db() as conn:
         row = conn.execute(
             f"SELECT items.* FROM items JOIN batches ON batches.id = items.batch_id"
             f" WHERE batches.state='queued' AND items.state='pending' AND items.source IN ({marks})"
@@ -277,7 +288,7 @@ def _set_lane(conn: sqlite3.Connection, name: str, **fields) -> None:
 
 
 def clear_block(name: str) -> None:
-    with _connect() as conn:
+    with _db() as conn:
         _set_lane(conn, name, blocked_until=0, block_reason=None)
     wake()
 
@@ -285,7 +296,7 @@ def clear_block(name: str) -> None:
 # ─── Worker ──────────────────────────────────────────────────────────────────
 
 def _mark_running(item_id: int) -> bool:
-    with _connect() as conn:
+    with _db() as conn:
         return conn.execute(
             "UPDATE items SET state='running', started_at=?, progress=NULL WHERE id=? "
             "AND state='pending' AND batch_id IN (SELECT id FROM batches WHERE state='queued')",
@@ -294,7 +305,7 @@ def _mark_running(item_id: int) -> bool:
 
 
 def set_metadata(item_id: int, title: str, duration_s: int) -> None:
-    with _connect() as conn:
+    with _db() as conn:
         conn.execute("UPDATE items SET title=?, duration_s=? WHERE id=?", (title, duration_s, item_id))
         conn.execute(
             "UPDATE batches SET title=? WHERE id=(SELECT batch_id FROM items WHERE id=?) "
@@ -303,14 +314,14 @@ def set_metadata(item_id: int, title: str, duration_s: int) -> None:
 
 
 def set_progress(item_id: int, message: str) -> None:
-    with _connect() as conn:
+    with _db() as conn:
         conn.execute("UPDATE items SET progress=? WHERE id=?", (message[:300], item_id))
 
 
 def _record_result(item: dict, result: dict) -> None:
     now = time.time()
     lane = item["source"]
-    with _connect() as conn:
+    with _db() as conn:
         lane_row = conn.execute("SELECT * FROM lanes WHERE name=?", (lane,)).fetchone()
         batch_state = conn.execute("SELECT state FROM batches WHERE id=?", (item["batch_id"],)).fetchone()[0]
 
