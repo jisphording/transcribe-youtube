@@ -4,6 +4,7 @@ import {
     Batch, BatchItem, ItemState, Lane, QueueStatus,
     cancelBatch, clearFinished, removeFinished, fmtDuration, fmtUsd, getQueue, resumeLane, retryBatch,
 } from "./batch-api";
+import { isSubscriptionModel } from "./llm-models";
 
 export const QUEUE_VIEW_TYPE = "media-import-queue";
 
@@ -159,7 +160,7 @@ export class QueueView extends ItemView {
         const finished = total - (batch.counts.pending ?? 0) - (batch.counts.running ?? 0);
         const title = box.createDiv({ text: `${batch.source === "podcast" ? "🎙" : "▶"} ${batch.title || batch.source_url}` });
         title.style.fontWeight = "600";
-        const subscription = batch.estimate.model.startsWith("antigravity:");
+        const subscription = isSubscriptionModel(batch.estimate.model);
         this.muted(box, `${batch.state} · ${finished}/${total} · ${subscription ? "subscription quota used" : `cost ${fmtUsd(batch.cost_usd)}${batch.estimate.unknown ? "" : ` (est. ${fmtUsd(batch.estimate.low)}–${fmtUsd(batch.estimate.high)})`}`}`);
 
         const btnRow = box.createDiv();

@@ -25,6 +25,7 @@ from claude import stream_claude, parse_claude_response, resolve_model, DEFAULT_
 import openrouter
 import local_llm
 import antigravity
+import claude_cli
 from cookies import has_cookies, save_cookies, delete_cookies
 import vault
 import batch_queue
@@ -335,6 +336,11 @@ def _chunk_plan(
         # The subscription CLI does not publish a dependable context/output
         # ceiling. Use a conservative input bound for every output mode.
         return transcript_chars > antigravity.MAX_TRANSCRIPT_CHARS, antigravity.MAX_TRANSCRIPT_CHARS
+    if claude_cli.is_claude_cli(model):
+        # Measured single-shot ceiling (docs/claude-cli-contract.md); extended mode keeps cloud segments.
+        if use_extended_model:
+            return transcript_chars > _EXTENDED_CHUNK_CHARS, _EXTENDED_CHUNK_CHARS
+        return transcript_chars > claude_cli.MAX_TRANSCRIPT_CHARS, claude_cli.MAX_TRANSCRIPT_CHARS
     if use_extended_model and not local_llm.is_local(model):
         return transcript_chars > _EXTENDED_CHUNK_CHARS, _EXTENDED_CHUNK_CHARS
     if not local_llm.is_local(model):
@@ -457,6 +463,9 @@ def _resolve_llm(model: str | None, default: str) -> str:
     if antigravity.is_antigravity(model):
         antigravity.validate_model(model)
         return model
+    if claude_cli.is_claude_cli(model):
+        claude_cli.validate_model(model)
+        return model
     if openrouter.is_openrouter(model):
         openrouter.model_info(model)
         return model
@@ -467,6 +476,8 @@ def _llm_label(model: str) -> str:
     if antigravity.is_antigravity(model):
         antigravity.validate_model(model)
         return "Gemini 3.8 Flash via Antigravity subscription"
+    if claude_cli.is_claude_cli(model):
+        return claude_cli.model_label(model)
     if local_llm.is_local(model):
         return local_llm.model_id(model)
     if openrouter.is_openrouter(model):
@@ -474,9 +485,15 @@ def _llm_label(model: str) -> str:
     return f"Claude {model.split('-')[1].capitalize()} {'.'.join(model.split('-')[2:])}"
 
 
+def _uses_subscription(model: str) -> bool:
+    return antigravity.is_antigravity(model) or claude_cli.is_claude_cli(model)
+
+
 def _stream_llm(model: str, system_prompt: str, user_message: str, effort: str | None):
     if antigravity.is_antigravity(model):
         return antigravity.stream_antigravity(model, system_prompt, user_message)
+    if claude_cli.is_claude_cli(model):
+        return claude_cli.stream_claude_cli(model, system_prompt, user_message, effort)
     if local_llm.is_local(model):
         return local_llm.stream_local(model, system_prompt, user_message)
     if openrouter.is_openrouter(model):
@@ -509,6 +526,9 @@ def _estimate_cost(
 ) -> float:
     if antigravity.is_antigravity(model):
         antigravity.validate_model(model)
+        return 0.0
+    if claude_cli.is_claude_cli(model):
+        claude_cli.validate_model(model)
         return 0.0
     if local_llm.is_local(model):
         return 0.0
@@ -846,7 +866,7 @@ def _run_claude_and_note(
         stage_label = "claude"
 
     is_local = local_llm.is_local(model)
-    uses_subscription = antigravity.is_antigravity(model)
+    uses_subscription = _uses_subscription(model)
     notes_only = is_local and not request.include_transcript
     include_extended_in_chunks = request.extended_summary or request.focus_include_extended
     include_focus_in_chunks = is_local and bool(request.focus_topic)
@@ -1153,7 +1173,7 @@ Please process this transcript according to the instructions."""
                         cache_read_tokens=cache_read,
                         elapsed=round(update["elapsed"], 1),
                         cost_usd=round(cost, 4),
-                        cost_kind="subscription_quota" if antigravity.is_antigravity(model) else "api_dollars",
+                        cost_kind="subscription_quota" if _uses_subscription(model) else "api_dollars",
                     )
         except Exception as e:
             yield _sse_event("error", f"{_llm_label(model)} error: {e}")

@@ -5,13 +5,16 @@ import {
     Setting,
 } from "obsidian";
 import type YTObsidianPlugin from "./main";
-import { OPENROUTER_MODELS, DEFAULT_OPENROUTER_MODEL, DEFAULT_ANTIGRAVITY_MODEL } from "./llm-models";
+import { OPENROUTER_MODELS, DEFAULT_OPENROUTER_MODEL, DEFAULT_ANTIGRAVITY_MODEL, CLAUDE_CLI_MODELS, DEFAULT_CLAUDE_CLI_MODEL } from "./llm-models";
+
+export type LlmProvider = "anthropic" | "openrouter" | "antigravity" | "claude-cli";
 
 export interface YTObsidianSettings {
     apiUrl: string;
-    llmProvider: "anthropic" | "openrouter" | "antigravity";
+    llmProvider: LlmProvider;
     openrouterModel: string;
     antigravityModel: string;
+    claudeCliModel: string;
     useParentFolder: boolean;       // true: folders below mediaTranscriptsFolder; false: siblings in vault root
     mediaTranscriptsFolder: string; // Parent folder (only used when useParentFolder is on)
     youtubeFolder: string;
@@ -30,6 +33,7 @@ export const DEFAULT_SETTINGS: YTObsidianSettings = {
     llmProvider: "anthropic",
     openrouterModel: DEFAULT_OPENROUTER_MODEL,
     antigravityModel: DEFAULT_ANTIGRAVITY_MODEL,
+    claudeCliModel: DEFAULT_CLAUDE_CLI_MODEL,
     useParentFolder: true,
     mediaTranscriptsFolder: "MEDIA_Transcripts",
     youtubeFolder: "YouTube",
@@ -70,13 +74,14 @@ export class YTObsidianSettingTab extends PluginSettingTab {
         containerEl.createEl("h3", { text: "AI models" });
         new Setting(containerEl)
             .setName("AI provider")
-            .setDesc("Used for single and bulk imports. Antigravity uses your signed-in Google subscription quota.")
+            .setDesc("Used for single and bulk imports. Antigravity and Claude subscription use your signed-in plan quota instead of API dollars.")
             .addDropdown((dropdown) => dropdown
                 .addOption("anthropic", "Anthropic Claude (default)")
                 .addOption("openrouter", "OpenRouter")
                 .addOption("antigravity", "Antigravity subscription")
+                .addOption("claude-cli", "Claude subscription")
                 .setValue(this.plugin.settings.llmProvider)
-                .onChange(async (value: "anthropic" | "openrouter" | "antigravity") => {
+                .onChange(async (value: LlmProvider) => {
                     this.plugin.settings.llmProvider = value;
                     this.plugin.settings.localModel = "";
                     await this.plugin.saveSettings();
@@ -102,6 +107,17 @@ export class YTObsidianSettingTab extends PluginSettingTab {
                     .setValue(this.plugin.settings.antigravityModel)
                     .onChange(async (value) => {
                         this.plugin.settings.antigravityModel = value;
+                        await this.plugin.saveSettings();
+                    }));
+        }
+        if (this.plugin.settings.llmProvider === "claude-cli") {
+            new Setting(containerEl).setName("Claude subscription model")
+                .setDesc("Runs the Claude Code CLI (CLAUDE_CLI_PATH in backend/.env) with your claude.ai login; uses plan usage limits, not ANTHROPIC_API_KEY. Transcripts are sent to Anthropic.")
+                .addDropdown((dropdown) => dropdown
+                    .addOptions(CLAUDE_CLI_MODELS)
+                    .setValue(this.plugin.settings.claudeCliModel)
+                    .onChange(async (value) => {
+                        this.plugin.settings.claudeCliModel = value;
                         await this.plugin.saveSettings();
                     }));
         }

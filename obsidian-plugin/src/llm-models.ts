@@ -21,3 +21,18 @@ export const ANTIGRAVITY_MODELS: Record<string, string> = {
     "antigravity:gemini-3.8-flash-medium": "Gemini 3.8 Flash (subscription quota)",
 };
 export const DEFAULT_ANTIGRAVITY_MODEL = Object.keys(ANTIGRAVITY_MODELS)[0];
+
+export const CLAUDE_CLI_HAIKU = "claude-cli:haiku";
+export const CLAUDE_CLI_SONNET = "claude-cli:sonnet";
+export const CLAUDE_CLI_OPUS = "claude-cli:opus";
+export const CLAUDE_CLI_MODELS: Record<string, string> = {
+    [CLAUDE_CLI_HAIKU]: "Claude Haiku (subscription, fastest)",
+    [CLAUDE_CLI_SONNET]: "Claude Sonnet (subscription, balanced)",
+    [CLAUDE_CLI_OPUS]: "Claude Opus (subscription, high quality)",
+    "claude-cli:fable": "Claude Fable (subscription, advanced reasoning)",
+};
+export const DEFAULT_CLAUDE_CLI_MODEL = CLAUDE_CLI_HAIKU;
+
+export function isSubscriptionModel(model: string): boolean {
+    return model.startsWith("antigravity:") || model.startsWith("claude-cli:");
+}

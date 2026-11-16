@@ -4,7 +4,7 @@ Import any YouTube video **or Apple Podcasts episode** as a clean, structured Ob
 
 ```
 YouTube URL    ─┐
-                ├─→  [native Python backend on macOS]  →  Claude / OpenRouter / Antigravity  →  Obsidian Note
+                ├─→  [native Python backend on macOS]  →  Claude / OpenRouter / Antigravity / Claude subscription  →  Obsidian Note
 Apple Podcast ─┘            │
                             └─→  podcast:transcript  →  free
                                  (RSS Podcasting 2.0)
@@ -341,6 +341,16 @@ Antigravity sends transcript text to Google for Gemini 3.8 Flash processing. You
 Homebrew executable symlinks such as `/opt/homebrew/bin/agy` are supported: the backend resolves the target before launching it and constructing the sandbox execution allowlist. Other local servers can coexist when their published host ports differ; the native backend uses `127.0.0.1:8000`. The legacy Docker Compose service also publishes port 8000, so stop it before running the native backend.
 
 The provider runs only on macOS and refuses to start if `sandbox-exec` containment is unavailable. Each call uses a fresh disposable workspace, a 600-second default process deadline and an 8 MB output limit per stream. Long transcripts use conservative 12,000-character source segments; these are application limits, not published Antigravity model limits. CLI failures, quota exhaustion and expired sign-in require an explicit operator retry; there is no fallback to a paid API provider. CLI sessions and diagnostics can persist in the user's Antigravity CLI data directory, and remote transcript retention is not established. Imports never install, update or log in to the CLI.
+
+### Claude subscription model
+
+Runs Claude through the Claude Code CLI with your claude.ai login instead of the paid API. Usage counts against your plan's usage limits; transcript text is sent to Anthropic.
+
+1. Install Claude Code and run `claude auth login` as the macOS user that runs the backend LaunchAgent.
+2. Set `CLAUDE_CLI_PATH` in `backend/.env` to the absolute path of the executable (e.g. `/Users/<you>/.local/bin/claude`; symlinks are resolved per call). Optionally set `CLAUDE_CLI_TIMEOUT_SECONDS` (default `900`). Restart the backend.
+3. In **Settings → Media to Obsidian → AI provider**, choose **Claude subscription** and pick Haiku, Sonnet, Opus or Fable.
+
+The backend strips `ANTHROPIC_*` variables from the CLI's environment (so `ANTHROPIC_API_KEY` is never used), runs it without tools in a fresh temp directory and fails clearly when the CLI is logged out, the model is unavailable or a usage limit is hit — there is no fallback to the paid API. Details: [`docs/claude-cli-contract.md`](docs/claude-cli-contract.md).
 
 ### Trigger the import
 - Click the audio-file icon in the left ribbon, **or**
