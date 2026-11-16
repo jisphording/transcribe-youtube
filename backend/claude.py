@@ -232,6 +232,19 @@ def parse_claude_response(raw_response: str) -> dict:
         start = cleaned.find("{")
         if start == -1:
             raise
+        # A complete object followed by more output (e.g. a second text block): keep the fullest object
+        decoder = json.JSONDecoder(strict=False)
+        objects, pos = [], start
+        while pos != -1:
+            try:
+                obj, end = decoder.raw_decode(cleaned, pos)
+            except json.JSONDecodeError:
+                break
+            if isinstance(obj, dict):
+                objects.append(obj)
+            pos = cleaned.find("{", end)
+        if objects:
+            return max(reversed(objects), key=len)
         candidate = cleaned[start:]
         end = candidate.rfind("}")
         attempts = [candidate[: end + 1]] if end != -1 else []

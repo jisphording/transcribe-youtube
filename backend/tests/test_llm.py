@@ -137,3 +137,16 @@ class OpenRouterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParseResponseTests(unittest.TestCase):
+    def test_complete_object_followed_by_extra_output(self):
+        first = json.dumps({"heading": "Part 3", "transcript": "", "summary": "s", "topics": ["a"]})
+        # Shape of the failed chunk: one-line JSON, blank line, then another text block
+        self.assertEqual(claude.parse_claude_response(first + '\n\nNote: {"summary": "x"}')["heading"], "Part 3")
+        self.assertEqual(claude.parse_claude_response(first + "\n\nDone — all keys returned.")["heading"], "Part 3")
+        fuller = json.dumps({"heading": "Fixed", "transcript": "", "summary": "s", "topics": ["a"], "resources": []})
+        self.assertEqual(claude.parse_claude_response(first + "\n\n" + fuller)["heading"], "Fixed")
+
+    def test_truncated_object_still_repaired(self):
+        self.assertEqual(claude.parse_claude_response('{"summary": "abc", "topics": ["x"')["topics"], ["x"])
