@@ -14,7 +14,7 @@ from sse_starlette.sse import EventSourceResponse
 from models import TranscriptRequest, CookieUpload, BatchRequest, BatchOptions, QueueItemRequest
 from youtube import (
     is_youtube_url, extract_video_id, get_video_metadata, get_transcript, transcript_to_plain_text,
-    YouTubeBlockedError, LIVE_STATUSES, is_youtube_collection_url, list_collection,
+    YouTubeBlockedError, LIVE_STATUSES, ONGOING_LIVE_STATUSES, is_youtube_collection_url, list_collection,
 )
 from podcast import parse_apple_url, is_apple_podcast_url, resolve_episode, resolve_episode_by_guid, get_rss_transcript, is_apple_show_url, list_show_episodes
 from web import is_web_url, fetch_article, pasted_article, trim_to_body, set_word_count, WebFetchError, MAX_TEXT_CHARS
@@ -612,8 +612,13 @@ def _run_youtube_pipeline(request: TranscriptRequest, total_steps: int):
         yield _sse_event("error", f"Could not fetch video metadata: {e}")
         return
 
-    if request.skip_live and metadata["live_status"] in LIVE_STATUSES:
-        yield _sse_event("error", f"Skipped: livestream ({metadata['live_status']})", skipped=True)
+    live_status = metadata["live_status"]
+    if live_status in ONGOING_LIVE_STATUSES:
+        yield _sse_event("error", f"Skipped: livestream has not finished yet ({live_status}) — import it after the stream ends",
+                         skipped=True)
+        return
+    if request.skip_live and live_status in LIVE_STATUSES:
+        yield _sse_event("error", f"Skipped: livestream ({live_status})", skipped=True)
         return
 
     yield _sse_event(
@@ -1395,6 +1400,7 @@ async def queue_single(req: QueueItemRequest):
         raise HTTPException(400, str(e))
     options = req.options.model_dump()
     options["allow_duplicate"] = req.allow_duplicate
+    options["skip_live"] = False  # a pasted video is imported even if it was a (finished) livestream
     batch_id = batch_queue.create_batch(
         source, req.url, req.url, options,
         {"vault_root": req.vault_root, "folders": req.folders.model_dump(), "scan_roots": req.scan_roots},
@@ -1491,6 +1497,7 @@ def _process_batch_item(item: dict, batch: dict) -> dict:
     # Re-check right before the work: the same item may have been imported manually meanwhile
     options = dict(batch["options"])
     allow_duplicate = options.pop("allow_duplicate", False)
+    skip_live = options.pop("skip_live", True)
     if not allow_duplicate and ids & vault.scan_ids(cfg["scan_roots"]):
         return {"state": "duplicate", "error": "Already in the vault.", "network": False}
 
@@ -1498,7 +1505,7 @@ def _process_batch_item(item: dict, batch: dict) -> dict:
     request = TranscriptRequest(
         url=item["url"],
         **options,
-        skip_live=True,
+        skip_live=skip_live,
         episode_guid=item["guid"],
         sleep_requests=BATCH_YOUTUBE_SLEEP_REQUESTS if source == "youtube" else 0,
     )

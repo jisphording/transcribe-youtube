@@ -194,3 +194,35 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         queue.cancel(batch['id'])
         queue.init_db()
         self.assertEqual(queue.get_batch(batch['id'])['items'][0]['state'], 'cancelled')
+
+    async def test_single_import_keeps_finished_livestreams_but_collections_skip_them(self):
+        await self.enqueue()
+        item = queue.next_item(time.time())
+        collection = queue.create_batch('youtube', 'https://www.youtube.com/@chan', 'chan', {}, {
+            'vault_root': str(self.root), 'folders': self.folders.model_dump(), 'scan_roots': [str(self.root)],
+        }, {}, [{'url': 'https://www.youtube.com/watch?v=bcdefghijkl', 'external_id': 'bcdefghijkl', 'title': 't', 'duration_seconds': 60}])
+        seen = []
+        def pipeline(request, steps):
+            seen.append(request.skip_live)
+            yield json.dumps({'stage': 'error', 'message': 'stop'})
+        with patch.object(main, '_run_youtube_pipeline', pipeline):
+            main._process_batch_item(item, queue.get_batch(item['batch_id'], with_vault=True))
+            other = queue.get_batch(collection, with_vault=True)
+            main._process_batch_item(other['items'][0], other)
+        self.assertEqual(seen, [False, True])
+
+    def test_youtube_pipeline_imports_finished_livestream_but_not_a_running_one(self):
+        def run(live_status, skip_live):
+            metadata = {'title': 'Stream', 'live_status': live_status, 'duration': '1:00', 'duration_seconds': 60}
+            note = iter([json.dumps({'stage': 'done', 'message': 'ok'})])
+            with patch.object(main, 'get_video_metadata', return_value=metadata), \
+                 patch.object(main, 'get_transcript', return_value=([{'text': 'hi', 'start': 0}], False)), \
+                 patch.object(main, 'transcript_to_plain_text', return_value='hi'), \
+                 patch.object(main, '_run_claude_and_note', return_value=note):
+                request = main.TranscriptRequest(url='https://www.youtube.com/watch?v=abcdefghijk', skip_live=skip_live)
+                return json.loads(list(main._run_youtube_pipeline(request, 4))[-1])
+        self.assertEqual(run('was_live', False)['stage'], 'done')
+        self.assertTrue(run('was_live', True)['skipped'])
+        live = run('is_live', False)
+        self.assertTrue(live['skipped'])
+        self.assertIn('has not finished', live['message'])

@@ -14,6 +14,7 @@ from cookies import COOKIE_FILE_PATH
 
 VALID_BROWSERS = {"chrome", "firefox", "safari", "edge", "brave"}
 LIVE_STATUSES = {"is_live", "is_upcoming", "was_live", "post_live"}
+ONGOING_LIVE_STATUSES = {"is_live", "is_upcoming"}  # no complete transcript yet
 _BLOCK_MARKERS = ("sign in to confirm", "not a bot", "try again later")
 
 
