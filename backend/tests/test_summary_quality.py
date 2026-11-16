@@ -49,6 +49,17 @@ class SummaryQualityTests(unittest.TestCase):
         self.assertNotIn('1-2 sentences', prompt)
         self.assertIn('40-60%', get_system_prompt(['extended']))
 
+    def test_frontmatter_escapes_quotes_in_title_and_channel(self):
+        import yaml
+        title = '"Everything Is Falling Apart, Right on Schedule": Alex Tan at #11 \\ New York'
+        metadata = {'title': title, 'channel': 'A "B" C', 'channel_url': 'https://x', 'url': 'url',
+                    'published': '2026-11-04', 'duration': '32:22', 'video_id': 'wuwOu2gPDM0'}
+        _, note = build_obsidian_note(metadata, 'Summary', 'Body')
+        front = yaml.safe_load(note.split('---')[1])
+        self.assertEqual(front['title'], title)
+        self.assertEqual(front['channel'], 'A "B" C')
+        self.assertEqual(front['duration'], '32:22')
+
     def test_resource_evidence_and_table_follow_all_main_text(self):
         metadata = {'title': 'Title', 'channel': 'Channel', 'channel_url': '', 'url': 'url'}
         _, note = build_obsidian_note(metadata, 'Executive', 'Transcript body', extended_summary='Detailed body',

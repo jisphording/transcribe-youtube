@@ -237,15 +237,15 @@ def build_obsidian_note(
     # Source-specific frontmatter fields
     fm_lines = [
         "---",
-        f'title: "{view["title"]}"',
-        f'{source_field_label}: "{view["source_name"]}"',
+        f'title: {_yaml_str(view["title"])}',
+        f'{source_field_label}: {_yaml_str(view["source_name"])}',
     ]
     if view["source_url"]:
-        fm_lines.append(f'{source_field_label}_url: "{view["source_url"]}"')
+        fm_lines.append(f'{source_field_label}_url: {_yaml_str(view["source_url"])}')
     fm_lines.extend([
-        f'url: "{view["url"]}"',
-        f'published: "{view["published"]}"',
-        f'duration: "{view["duration"]}"',
+        f'url: {_yaml_str(view["url"])}',
+        f'published: {_yaml_str(view["published"])}',
+        f'duration: {_yaml_str(view["duration"])}',
     ])
     # Stable ids for duplicate detection (plugin + batch queue)
     for key in ("youtube_id", "apple_episode_id", "episode_guid"):
