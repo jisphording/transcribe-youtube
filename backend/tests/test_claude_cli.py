@@ -17,6 +17,8 @@ mode = os.environ.get("FAKE_MODE", "ok")
 record = {{"argv": sys.argv[1:], "env": dict(os.environ), "stdin": sys.stdin.read(), "cwd": os.getcwd()}}
 with open(os.environ["FAKE_RECORD"], "w") as f:
     json.dump(record, f)
+with open(os.environ["FAKE_RECORD"] + ".calls", "a") as f:
+    f.write(json.dumps({{"argv": sys.argv[1:], "stdin_chars": len(record["stdin"]), "segment": "TRANSCRIPT SEGMENT" in record["stdin"]}}) + "\\n")
 if mode == "hang":
     with open(os.environ["FAKE_RECORD"] + ".pid", "w") as f:
         f.write(str(os.getpid()))
@@ -160,6 +162,50 @@ class ClaudeCliTests(unittest.TestCase):
         settings = build.call_args.kwargs["import_settings"]
         self.assertEqual((settings["selected_model"], settings["model"]), ("claude-cli:haiku", "claude-cli:haiku"))
         self.assertEqual(self.recorded()["argv"][self.recorded()["argv"].index("--effort") + 1], "low")
+
+    def calls(self) -> list[dict]:
+        path = Path(str(self.record) + ".calls")
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_limit_error_carries_reset_time(self):
+        with self.assertRaises(claude_cli.ClaudeCliLimitError) as ctx:
+            self.run_cli("limit")
+        self.assertEqual(ctx.exception.resets_at, 1900000000)
+
+    def test_chunked_extended_import_calls_cli_once_per_segment(self):
+        segment = ("word " * 2_000).strip()
+        transcript = "\n\n".join([segment] * 4)
+        n_segments = len(main._split_transcript(transcript, main._EXTENDED_CHUNK_CHARS))
+        self.assertGreater(n_segments, 1)
+        req = TranscriptRequest(url="https://youtu.be/x", model="claude-cli:haiku", extended_model="claude-cli:haiku",
+                                extended_summary=True)
+        with patch.dict(os.environ, self.env), patch.object(main, "stream_claude") as anthropic_stream, \
+             patch.object(main.openrouter, "stream_openrouter") as openrouter_stream, \
+             patch.object(main, "build_obsidian_note", return_value=("note.md", "note")):
+            events = [json.loads(e) for e in main._run_claude_and_note(req, {"title": "T", "channel": "C", "url": req.url}, transcript, False, "youtube", "", 4)]
+        anthropic_stream.assert_not_called()
+        openrouter_stream.assert_not_called()
+        self.assertEqual(events[-1]["stage"], "done")
+        calls = self.calls()
+        segment_calls = [c for c in calls if c["segment"]]
+        self.assertEqual(len(segment_calls), n_segments)
+        self.assertEqual(len(calls), n_segments + 1)  # plus the executive summary over segment summaries
+        self.assertTrue(all(c["argv"][c["argv"].index("--effort") + 1] == "medium" for c in calls))
+        self.assertTrue(all(c["stdin_chars"] <= main._EXTENDED_CHUNK_CHARS + 2_000 for c in calls))
+
+    def test_limit_error_is_a_blocked_error_event_without_paid_fallback(self):
+        req = TranscriptRequest(url="https://youtu.be/x", model="claude-cli:haiku")
+        with patch.dict(os.environ, {**self.env, "FAKE_MODE": "limit"}), \
+             patch.object(main, "stream_claude") as anthropic_stream, \
+             patch.object(main.openrouter, "stream_openrouter") as openrouter_stream:
+            events = [json.loads(e) for e in main._run_claude_and_note(req, {"title": "T", "channel": "C", "url": req.url}, "text", False, "youtube", "", 4)]
+        anthropic_stream.assert_not_called()
+        openrouter_stream.assert_not_called()
+        self.assertEqual(len(self.calls()), 1)
+        last = events[-1]
+        self.assertEqual((last["stage"], last["blocked"], last["block_kind"], last["resets_at"]),
+                         ("error", True, "usage_limit", 1900000000))
+        self.assertIn("usage limit reached", last["message"])
 
     def test_chunk_plan_and_cost(self):
         self.assertEqual(main._chunk_plan("claude-cli:sonnet", "youtube", False, 250_000, 0, 0, False), (False, claude_cli.MAX_TRANSCRIPT_CHARS))

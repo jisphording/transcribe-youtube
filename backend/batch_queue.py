@@ -327,9 +327,14 @@ def _record_result(item: dict, result: dict) -> None:
 
         if result.get("blocked"):
             level = lane_row["backoff_level"]
-            wait = BLOCK_BACKOFF_SECONDS[min(level, len(BLOCK_BACKOFF_SECONDS) - 1)]
-            _set_lane(conn, lane, blocked_until=now + wait, backoff_level=level + 1,
-                      block_reason=(result.get("error") or "blocked")[:300])
+            reason = (result.get("error") or "blocked")[:300]
+            resets_at = result.get("resets_at") or 0
+            if resets_at > now:
+                # A reported usage-limit reset is exact; the backoff ladder stays untouched
+                _set_lane(conn, lane, blocked_until=float(resets_at), block_reason=reason)
+            else:
+                wait = BLOCK_BACKOFF_SECONDS[min(level, len(BLOCK_BACKOFF_SECONDS) - 1)]
+                _set_lane(conn, lane, blocked_until=now + wait, backoff_level=level + 1, block_reason=reason)
             back = "cancelled" if batch_state == "cancelled" else "pending"
             conn.execute("UPDATE items SET state=?, started_at=NULL, error=?, progress=NULL WHERE id=?",
                          (back, result.get("error"), item["id"]))

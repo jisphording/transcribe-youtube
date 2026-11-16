@@ -134,6 +134,84 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lane['blocked_until'], 0)
         self.assertEqual(queue.get_batch(batch['id'])['items'][0]['state'], 'failed')
 
+    async def queue_cli_podcast(self):
+        model = 'claude-cli:sonnet'
+        req = QueueItemRequest(url='https://podcasts.apple.com/us/podcast/test/id123?i=456',
+            options=BatchOptions(model=model, extended_model=model), vault_root=str(self.root),
+            folders=self.folders, scan_roots=[str(self.root)])
+        batch = await main.queue_single(req)
+        return batch, batch['items'][0]
+
+    def podcast_pipeline_with_cli_error(self, error: Exception):
+        def pipeline(request, total_steps):
+            yield json.dumps({'stage': 'metadata_done', 'message': 'ok', 'title': 'Episode'})
+            yield from main._run_claude_and_note(request, {'title': 'Episode', 'show': 'Show', 'url': request.url},
+                                                 'spoken words', False, 'podcast', '', total_steps)
+        return patch.object(main, '_run_podcast_pipeline', side_effect=pipeline), \
+            patch.object(main.claude_cli, 'stream_claude_cli', side_effect=error)
+
+    async def test_usage_limit_keeps_item_pending_pauses_lane_until_reset_without_paid_fallback(self):
+        batch, item = await self.queue_cli_podcast()
+        reset = int(time.time()) + 7200
+        pipeline, cli = self.podcast_pipeline_with_cli_error(
+            main.claude_cli.ClaudeCliLimitError('Claude subscription usage limit reached; retry after the limit resets.', reset))
+        with pipeline, cli as cli_stream, patch.object(main, 'stream_claude') as anthropic_stream, \
+             patch.object(main.openrouter, 'stream_openrouter') as openrouter_stream, \
+             patch.object(main.antigravity, 'stream_antigravity') as antigravity_stream:
+            result = main._process_batch_item(item, queue.get_batch(item['batch_id'], with_vault=True))
+        self.assertEqual(cli_stream.call_count, 1)
+        anthropic_stream.assert_not_called()
+        openrouter_stream.assert_not_called()
+        antigravity_stream.assert_not_called()
+        self.assertTrue(result['blocked'])
+        self.assertEqual((result['block_kind'], result['resets_at']), ('usage_limit', reset))
+        self.assertFalse((self.root / 'Podcasts').exists())
+        queue._record_result(item, result)
+        lane = queue.lane_status()['podcast']
+        self.assertTrue(lane['blocked'])
+        self.assertEqual(lane['blocked_until'], reset)
+        self.assertEqual(lane['backoff_level'], 0)
+        self.assertIn('subscription usage limit', lane['block_reason'])
+        self.assertEqual(queue.get_batch(batch['id'])['items'][0]['state'], 'pending')
+        self.assertIsNone(queue.next_item(time.time()))
+        self.assertEqual(queue.lane_status()['youtube']['blocked_until'], 0)
+
+    async def test_usage_limit_without_reset_uses_backoff_and_skips_youtube_cookie_retry(self):
+        model = 'claude-cli:haiku'
+        req = QueueItemRequest(url='https://www.youtube.com/watch?v=abcdefghijk',
+            options=BatchOptions(model=model, extended_model=model), vault_root=str(self.root),
+            folders=self.folders, scan_roots=[str(self.root)])
+        batch = await main.queue_single(req)
+        item = batch['items'][0]
+        error = json.dumps({'stage': 'error', 'message': 'Claude subscription usage limit reached.', 'blocked': True,
+                            'block_kind': 'usage_limit', 'resets_at': None})
+        with patch.object(main, '_run_youtube_pipeline', side_effect=lambda *a: iter([error])) as pipeline:
+            result = main._process_batch_item(item, queue.get_batch(item['batch_id'], with_vault=True))
+        self.assertEqual(pipeline.call_count, 1)
+        before = time.time()
+        queue._record_result(item, result)
+        lane = queue.lane_status()['youtube']
+        self.assertAlmostEqual(lane['blocked_until'] - before, queue.BLOCK_BACKOFF_SECONDS[0], delta=5)
+        self.assertEqual(lane['backoff_level'], 1)
+        self.assertEqual(queue.get_batch(batch['id'])['items'][0]['state'], 'pending')
+
+    async def test_non_limit_cli_error_fails_only_that_item(self):
+        batch, item = await self.queue_cli_podcast()
+        second = await self.enqueue('https://podcasts.apple.com/us/podcast/test/id123?i=789')
+        pipeline, cli = self.podcast_pipeline_with_cli_error(RuntimeError('Claude CLI failed (exit 1); check `claude auth status` and retry.'))
+        with pipeline, cli, patch.object(main, 'stream_claude') as anthropic_stream:
+            result = main._process_batch_item(item, queue.get_batch(item['batch_id'], with_vault=True))
+        anthropic_stream.assert_not_called()
+        self.assertEqual(result['state'], 'failed')
+        self.assertFalse(result['blocked'])
+        queue._record_result(item, result)
+        lane = queue.lane_status()['podcast']
+        self.assertFalse(lane['blocked'])
+        self.assertEqual(queue.get_batch(batch['id'])['items'][0]['state'], 'failed')
+        self.assertEqual(queue.get_batch(second['id'])['items'][0]['state'], 'pending')
+        with patch.object(queue, '_eligible_lanes', return_value=['podcast']):
+            self.assertEqual(queue.next_item(time.time())['batch_id'], second['id'])
+
     async def test_worker_runs_single_video_and_podcast_serially_and_writes_notes(self):
         first = await self.enqueue()
         second = await self.enqueue('https://podcasts.apple.com/us/podcast/test/id123?i=456')

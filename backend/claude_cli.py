@@ -23,6 +23,15 @@ TIMEOUT = int(os.environ.get("CLAUDE_CLI_TIMEOUT_SECONDS", "900"))
 MAX_OUTPUT = 16_000_000
 # 400k chars were verified single-shot; keep a conservative margin and chunk above it.
 MAX_TRANSCRIPT_CHARS = 300_000
+LIMIT_MESSAGE = "Claude subscription usage limit reached"
+
+
+class ClaudeCliLimitError(RuntimeError):
+    """The subscription usage limit blocks further calls; resets_at is epoch seconds when reported."""
+
+    def __init__(self, message: str, resets_at: int | None = None):
+        super().__init__(message)
+        self.resets_at = resets_at
 
 
 def is_claude_cli(model: str | None) -> bool:
@@ -89,12 +98,19 @@ def _limit_reset(events: list[dict]) -> int | None:
     return None
 
 
+def _raise_error(events: list[dict], final: dict | None, returncode: int) -> None:
+    message = _error_message(events, final, returncode)
+    if message.startswith(LIMIT_MESSAGE):
+        raise ClaudeCliLimitError(message, _limit_reset(events) or None)
+    raise RuntimeError(message)
+
+
 def _error_message(events: list[dict], final: dict | None, returncode: int) -> str:
     text = str((final or {}).get("result", "")).lower()
     reset = _limit_reset(events)
     if reset is not None or any(term in text for term in ("usage limit", "rate limit", "limit reached")):
         when = f" (resets {datetime.fromtimestamp(reset).strftime('%Y-%m-%d %H:%M')})" if reset else ""
-        return f"Claude subscription usage limit reached{when}; retry after the limit resets."
+        return f"{LIMIT_MESSAGE}{when}; retry after the limit resets."
     if "not logged in" in text or "/login" in text:
         return "The Claude CLI is not logged in; run `claude auth login` as this user and retry."
     if (final or {}).get("api_error_status") == 404 or "selected model" in text:
@@ -118,7 +134,7 @@ def _parse(stdout: bytes, returncode: int) -> tuple[str, dict]:
     if final and final.get("stop_reason") == "refusal":
         return str(final.get("result") or ""), {**(final.get("usage") or {}), "stop_reason": "refusal"}
     if final is None or final.get("is_error") or returncode:
-        raise RuntimeError(_error_message(events, final, returncode))
+        _raise_error(events, final, returncode)
     text = final.get("result")
     if not isinstance(text, str) or not text.strip():
         raise RuntimeError("Claude CLI returned an empty result.")

@@ -447,6 +447,13 @@ def _sse_event(stage: str, message: str, **extra) -> str:
     return json.dumps(data)
 
 
+def _llm_error(message: str, e: Exception) -> str:
+    """A subscription usage limit blocks the lane (batch queue) instead of failing the item."""
+    if isinstance(e, claude_cli.ClaudeCliLimitError):
+        return _sse_event("error", f"{message}: {e}", blocked=True, block_kind="usage_limit", resets_at=e.resets_at)
+    return _sse_event("error", f"{message}: {e}")
+
+
 # Pricing per million tokens (USD)
 MODEL_PRICING = {
     HAIKU:  {"input": 0.10, "output": 0.50, "cache_read": 0.01},
@@ -952,7 +959,7 @@ def _run_claude_and_note(
                         total_out_tokens += update["output_tokens"]
                         cloud_cost += update.get("cost_usd") if update.get("cost_usd") is not None else _estimate_cost(model, update["input_tokens"], update["output_tokens"])
             except Exception as e:
-                yield _sse_event("error", f"{_llm_label(model)} error on chunk {i + 1}: {e}")
+                yield _llm_error(f"{_llm_label(model)} error on chunk {i + 1}", e)
                 return
 
             if raw_chunk is None:
@@ -1014,7 +1021,7 @@ def _run_claude_and_note(
                     total_out_tokens += update["output_tokens"]
                     cloud_cost += update.get("cost_usd") if update.get("cost_usd") is not None else _estimate_cost(model, update["input_tokens"], update["output_tokens"])
         except Exception as e:
-            yield _sse_event("error", f"{_llm_label(model)} error on summary: {e}")
+            yield _llm_error(f"{_llm_label(model)} error on summary", e)
             return
 
         elapsed_total = time.time() - chunk_start_time
@@ -1058,7 +1065,7 @@ def _run_claude_and_note(
                         total_in_tokens += local_stats["in"] - before_in
                         total_out_tokens += local_stats["out"] - before_out
                     except Exception as e:
-                        yield _sse_event("error", f"{_llm_label(model)} error on focus: {e}")
+                        yield _llm_error(f"{_llm_label(model)} error on focus", e)
                         return
         else:
             resources = [r for s in cloud_sections for r in (s.get("resources") or [])] if request.extract_resources else []
@@ -1181,7 +1188,7 @@ Please process this transcript according to the instructions."""
                         cost_kind="subscription_quota" if _uses_subscription(model) else "api_dollars",
                     )
         except Exception as e:
-            yield _sse_event("error", f"{_llm_label(model)} error: {e}")
+            yield _llm_error(f"{_llm_label(model)} error", e)
             return
 
         if raw_response is None:
@@ -1480,6 +1487,8 @@ def _run_batch_pipeline(request: TranscriptRequest, source: str, item_id: int) -
                 "state": "skipped" if event.get("skipped") else "failed",
                 "error": event["message"],
                 "blocked": event.get("blocked", False),
+                "block_kind": event.get("block_kind"),
+                "resets_at": event.get("resets_at"),
                 "cost_usd": round(cost, 4) or None,
             }
         elif stage == "done":
@@ -1510,7 +1519,7 @@ def _process_batch_item(item: dict, batch: dict) -> dict:
         sleep_requests=BATCH_YOUTUBE_SLEEP_REQUESTS if source == "youtube" else 0,
     )
     result = _run_batch_pipeline(request, source, item["id"])
-    if result.get("blocked") and source == "youtube":
+    if result.get("blocked") and source == "youtube" and result.get("block_kind") != "usage_limit":
         # Guest session first; account cookies only as a fallback after a bot check
         batch_queue.set_progress(item["id"], "Blocked as guest — retrying once with browser cookies…")
         result = _run_batch_pipeline(request.model_copy(update={"cookie_browser": "safari"}), source, item["id"])

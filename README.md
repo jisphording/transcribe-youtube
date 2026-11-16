@@ -350,7 +350,7 @@ Runs Claude through the Claude Code CLI with your claude.ai login instead of the
 2. Set `CLAUDE_CLI_PATH` in `backend/.env` to the absolute path of the executable (e.g. `/Users/<you>/.local/bin/claude`; symlinks are resolved per call). Optionally set `CLAUDE_CLI_TIMEOUT_SECONDS` (default `900`). Restart the backend.
 3. In **Settings → Media to Obsidian → AI provider**, choose **Claude subscription** and pick Haiku, Sonnet, Opus or Fable.
 
-The backend strips `ANTHROPIC_*` variables from the CLI's environment (so `ANTHROPIC_API_KEY` is never used), runs it without tools in a fresh temp directory and fails clearly when the CLI is logged out, the model is unavailable or a usage limit is hit — there is no fallback to the paid API. Details: [`docs/claude-cli-contract.md`](docs/claude-cli-contract.md).
+The backend strips `ANTHROPIC_*` variables from the CLI's environment (so `ANTHROPIC_API_KEY` is never used), runs it without tools in a fresh temp directory and fails clearly when the CLI is logged out, the model is unavailable or a usage limit is hit — there is no fallback to the paid API. In the import queue a usage limit pauses that lane until the reported reset time (or along the normal backoff when none is reported) and keeps the item pending; the Queue view shows the pause and "Resume now" lifts it early. Long transcripts are sent in one call up to 300,000 characters; extended and focus summaries use 12,000-character segments. Details: [`docs/claude-cli-contract.md`](docs/claude-cli-contract.md).
 
 ### Trigger the import
 - Click the audio-file icon in the left ribbon, **or**

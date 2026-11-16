@@ -4,6 +4,8 @@ Measured 2026-11-16 with Claude Code CLI 2.1.318 (`~/.local/bin/claude`, a symli
 
 **Verdict: GO** — with the caveats under "Findings that shape the provider".
 
+**Status: implemented** in `backend/claude_cli.py` (provider `claude-cli:`); the usage-limit case is still unobserved and is handled as described under "Error mapping".
+
 ## Invocation
 
 Resolve the executable with `os.path.realpath()` of an absolute path from env (the LaunchAgent PATH omits `~/.local/bin`; same pattern as `antigravity.py`).

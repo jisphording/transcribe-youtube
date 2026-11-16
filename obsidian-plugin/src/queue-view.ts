@@ -131,9 +131,17 @@ export class QueueView extends ItemView {
         box.style.fontSize = "12px";
         box.style.marginBottom = "8px";
         if (lane.blocked) {
-            const until = new Date(lane.blocked_until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+            const date = new Date(lane.blocked_until * 1000);
+            const sameDay = date.toDateString() === new Date().toDateString();
+            const until = sameDay
+                ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                : date.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
             box.style.color = "var(--text-warning)";
-            box.setText(`⚠️ ${label} paused until ${until} — ${lane.block_reason ?? "blocked"}`);
+            if (lane.block_reason?.includes("subscription usage limit")) {
+                box.setText(`⚠️ Subscription usage limit reached — ${label} imports paused until ${until}. Pending items resume automatically.`);
+            } else {
+                box.setText(`⚠️ ${label} paused until ${until} — ${lane.block_reason ?? "blocked"}`);
+            }
             const btn = box.createEl("button", { text: "Resume now" });
             btn.style.marginLeft = "6px";
             btn.addEventListener("click", async () => {
