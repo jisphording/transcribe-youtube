@@ -190,5 +190,85 @@ class AntigravityTests(unittest.TestCase):
                     antigravity._run("system", "source")
 
 
+class CliErrorDetailTests(unittest.TestCase):
+    SANDBOX = b"sandbox-exec: sandbox_apply: Operation not permitted"
+
+    def detail(self, events: list[dict] | None = None, stderr: bytes = b"", code: int = 71) -> str:
+        return antigravity._cli_error_detail(events or [], stderr, code)
+
+    @staticmethod
+    def result(**fields) -> list[dict]:
+        return [{"event": "result", "result": {"status": "ERROR", **fields}}]
+
+    def test_sandbox_denial_reports_sandbox_message(self):
+        self.assertIn("macOS sandbox", self.detail(stderr=self.SANDBOX))
+
+    def test_sandbox_denial_naming_a_model_path_is_still_a_sandbox_problem(self):
+        stderr = self.SANDBOX + b" /opt/homebrew/model not found/agy"
+        self.assertIn("macOS sandbox", self.detail(stderr=stderr))
+
+    def test_network_and_tls_stderr_reports_network_message(self):
+        self.assertIn("reach its service", self.detail(stderr=b"tls: failed to verify certificate", code=1))
+
+    def test_quota_in_terminal_result_reports_quota_message(self):
+        self.assertIn("quota or rate limit", self.detail(self.result(error="RESOURCE_EXHAUSTED"), code=1))
+
+    def test_auth_and_keychain_stderr_reports_auth_message(self):
+        self.assertIn("authentication failed", self.detail(stderr=b"keychain item unavailable: login required", code=1))
+
+    def test_unavailable_model_in_terminal_result_reports_model_message(self):
+        self.assertIn("model is unavailable", self.detail(self.result(error="Model not found: gemini"), code=1))
+
+    def test_unrecognised_terminal_error_keeps_exit_code(self):
+        message = self.detail(self.result(error="something odd"))
+        self.assertIn("exit 71", message)
+        self.assertIn("unclassified", message)
+
+    def test_no_events_and_empty_stderr_reports_missing_result(self):
+        message = self.detail(code=1)
+        self.assertIn("exit 1", message)
+        self.assertIn("without a terminal result", message)
+
+    def test_broad_words_do_not_misclassify(self):
+        self.assertNotIn("authentication", self.detail(stderr=b"author: someone"))
+        self.assertNotIn("reach its service", self.detail(stderr=b"connection string parsed from config"))
+        self.assertNotIn("model is unavailable", self.detail(stderr=b"loading model weights from /tmp/models"))
+
+    def test_raw_diagnostics_never_appear_in_messages(self):
+        secrets = ("sk-FAKE-TOKEN-123", "the quick brown fox transcript fragment")
+        stderr = f"{secrets[0]} {secrets[1]} Operation not permitted".encode()
+        payload = self.result(error=f"RESOURCE_EXHAUSTED {secrets[0]}", message=secrets[1])
+        for message in (self.detail(stderr=stderr), self.detail(payload, stderr), self.detail(self.result(error=secrets[1]))):
+            for secret in secrets:
+                self.assertNotIn(secret, message)
+        with self.assertRaises(RuntimeError) as raised:
+            antigravity._terminal_result(payload)
+        for secret in secrets:
+            self.assertNotIn(secret, str(raised.exception))
+
+    @patch.object(antigravity.os, "uname")
+    @patch.object(antigravity.subprocess, "Popen")
+    def test_run_exit_71_with_sandbox_stderr_raises_sandbox_message(self, popen, uname):
+        uname.return_value.sysname = "Darwin"
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "agy"
+            exe.write_text("fixture")
+            class Child:
+                pid = 123
+                returncode = 71
+                stdout = io.BytesIO()
+                stderr = io.BytesIO(CliErrorDetailTests.SANDBOX + b" token sk-FAKE-TOKEN-123")
+                stdin = io.BytesIO()
+                def wait(self, timeout): return 71
+                def poll(self): return 71
+            popen.return_value = Child()
+            with patch.dict(os.environ, {"ANTIGRAVITY_CLI_PATH": str(exe)}, clear=False), \
+                    patch.object(antigravity, "_terminate_process_group"):
+                with self.assertRaises(RuntimeError) as raised:
+                    antigravity._run("system", "source")
+            self.assertIn("macOS sandbox", str(raised.exception))
+            self.assertNotIn("sk-FAKE-TOKEN-123", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

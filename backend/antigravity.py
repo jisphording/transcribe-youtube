@@ -1,6 +1,7 @@
 """Antigravity subscription provider using the approved macOS containment boundary."""
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -31,22 +32,44 @@ def validate_model(model: str) -> str:
     return MODEL
 
 
-def _terminal_result(events: list[dict]) -> tuple[str, dict]:
+_MESSAGES = {
+    "sandbox": "Antigravity could not start inside the required macOS sandbox; check system permissions and retry.",
+    "quota": "Antigravity subscription quota or rate limit reached; retry explicitly after access is available.",
+    "auth": "Antigravity authentication failed or expired; sign in to the CLI and retry.",
+    "network": "Antigravity could not reach its service; check network access and retry.",
+    "model": "The configured Antigravity model is unavailable; verify the signed-in account's model access.",
+}
+# Ordered specific to broad: a sandbox denial may also name a model path or mention a login.
+_PATTERNS = (
+    ("sandbox", r"sandbox|operation not permitted|permission denied"),
+    ("quota", r"quota|rate limit|resource_exhausted|resource exhausted|too many requests"),
+    ("auth", r"\bauth\b|authenticat|unauthori[sz]ed|\blogin\b|credential|keychain"),
+    ("network", r"\bnetwork\b|\btls\b|\bssl\b|certificate|connection (?:refused|reset|timed out|failed)|unreachable"),
+    ("model", r"\bmodel\b[^.\n]{0,60}?(?:not found|unavailable|not available|not supported|unsupported|does not exist)"
+              r"|(?:unknown|unsupported|invalid) model\b"),
+)
+
+
+def _classify(diagnostic: str) -> str | None:
+    text = diagnostic.lower()
+    for kind, pattern in _PATTERNS:
+        if re.search(pattern, text):
+            return _MESSAGES[kind]
+    return None
+
+
+def _final_result(events: list[dict]) -> dict | None:
     finals = [event.get("result", event) for event in events if event.get("event") == "result" or event.get("type") == "result"]
-    if not finals:
+    return finals[-1] if finals else None
+
+
+def _terminal_result(events: list[dict]) -> tuple[str, dict]:
+    final = _final_result(events)
+    if final is None:
         raise RuntimeError("Antigravity stream ended without a terminal result.")
-    final = finals[-1]
     if final.get("status") != "SUCCESS":
-        detail = " ".join(str(final.get(key, "")) for key in ("status", "error", "message")).lower()
-        if any(word in detail for word in ("quota", "rate limit", "resource exhausted", "resource_exhausted", "too many requests")):
-            message = "Antigravity subscription quota or rate limit reached; retry explicitly after access is available."
-        elif any(word in detail for word in ("auth", "login", "unauthorized", "credential")):
-            message = "Antigravity authentication failed or expired; sign in to the CLI and retry."
-        elif any(word in detail for word in ("model", "not found", "unavailable")):
-            message = "The configured Antigravity model is unavailable; verify the signed-in account's model access."
-        else:
-            message = "Antigravity did not complete successfully."
-        raise RuntimeError(message)
+        detail = " ".join(str(final.get(key, "")) for key in ("status", "error", "message"))
+        raise RuntimeError(_classify(detail) or "Antigravity did not complete successfully.")
     response = final.get("structured_output") or final.get("response")
     if not isinstance(response, str) or not response.strip():
         raise RuntimeError("Antigravity returned no result.")
@@ -55,35 +78,15 @@ def _terminal_result(events: list[dict]) -> tuple[str, dict]:
 
 def _cli_error_detail(events: list[dict], stderr: bytes, returncode: int) -> str:
     """Turn CLI failure envelopes and diagnostics into safe, actionable messages."""
-    diagnostic = stderr.decode(errors="replace").lower()
-    finals = [
-        event.get("result", event) for event in events
-        if event.get("event") == "result" or event.get("type") == "result"
-    ]
-    if finals:
-        final = finals[-1]
-        diagnostic += " " + " ".join(str(final.get(key, "")) for key in ("status", "error", "message")).lower()
-
-    quota_terms = ("quota", "rate limit", "resource exhausted", "resource_exhausted", "too many requests")
-    if any(term in diagnostic for term in quota_terms):
-        return "Antigravity subscription quota or rate limit reached; retry explicitly after access is available."
-    if any(term in diagnostic for term in ("auth", "login", "unauthorized", "credential", "keychain")):
-        return "Antigravity authentication failed or expired; sign in to the CLI and retry."
-    if any(term in diagnostic for term in ("model", "not found", "unavailable")):
-        return "The configured Antigravity model is unavailable; verify the signed-in account's model access."
-    if any(term in diagnostic for term in ("sandbox", "operation not permitted", "permission denied")):
-        return "Antigravity could not start inside the required macOS sandbox; check system permissions and retry."
-    if any(term in diagnostic for term in ("network", "connection", "tls", "certificate")):
-        return "Antigravity could not reach its service; check network access and retry."
-    if not finals:
-        return (
-            f"Antigravity CLI failed (exit {returncode}) without a terminal result. "
-            "Check the local CLI diagnostics and retry."
-        )
-    return (
-        f"Antigravity CLI failed (exit {returncode}) with an unclassified error. "
-        "Check the local CLI diagnostics and retry."
-    )
+    diagnostic = stderr.decode(errors="replace")
+    final = _final_result(events)
+    if final is not None:
+        diagnostic += " " + " ".join(str(final.get(key, "")) for key in ("status", "error", "message"))
+    message = _classify(diagnostic)
+    if message:
+        return message
+    reason = "with an unclassified error" if final is not None else "without a terminal result"
+    return f"Antigravity CLI failed (exit {returncode}) {reason}. Check the local CLI diagnostics and retry."
 
 
 def _terminate_process_group(pid: int, grace: float = 3.0) -> None:
