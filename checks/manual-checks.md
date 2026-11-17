@@ -60,3 +60,77 @@ Run these checks as the macOS account that owns the backend LaunchAgent. The Lau
 **Verified against**: null
 **Status**: unverified
 **Blocked reason**: none
+
+## Real-import verification (plan 04, phase 3)
+
+Deferred on 2026-11-17: the machine used for the plan run has no signed-in Antigravity CLI, real provider credentials or Obsidian vault, so these checks were never run. Run them on a machine that has all three, then fill in `Last verified`, `Verified against` (commit), `Status` and a redacted result (date, provider, outcome; no transcript text, credentials or private vault content). A defect found here becomes a new debug run or a `plan/improvements.md` entry, not a code change in the same step.
+
+### MC-06 — Antigravity failures are classified (no bare exit 71)
+
+**Claim**: A failed Antigravity import in the Queue view shows a classified message (sandbox, quota, auth, network, model) or "exit N … unclassified", never a bare "Antigravity CLI failed (exit 71)".
+**Doc**: docs/antigravity-cli-contract.md
+**Covers**: backend/antigravity.py
+**Procedure**: Restart the backend (`backend/scripts/stop.sh`, then `backend/scripts/start.sh`) after checking the Queue view has no running item, and confirm `curl -fsS http://127.0.0.1:8000/health`. In Obsidian, queue a YouTube video longer than 1 hour with provider "Antigravity". Run it directly on the machine, not inside another agent's sandbox (a nested sandbox reproduces `sandbox_apply: Operation not permitted`, exit 71, and is not a valid test). If the import succeeds, record that. If it fails, record the exact Queue view message and confirm it is classified.
+**Last verified**: null
+**Verified against**: null
+**Status**: unverified
+**Blocked reason**: operator run required on a machine with signed-in Antigravity CLI, backend LaunchAgent and Obsidian
+
+### MC-07 — Extended summary with resources on a real cloud provider
+
+**Claim**: A real extended import produces an extended section of roughly 40-60% of the transcript's word count (advisory, not enforced), resources that all occur in the transcript, and resources placed last in the note.
+**Doc**: CLAUDE.md
+**Covers**: backend/main.py
+**Procedure**: Queue a 30-60 minute YouTube video that names tools or products, with extended summary and resources on, on a real cloud provider (Claude API, Claude subscription or OpenRouter). Open the finished note. Compare the extended section's word count with the transcript's, check that every listed resource appears in the transcript, and confirm the resources section is the last section. Record provider, model, video length, extended/transcript word counts and outcome.
+**Last verified**: null
+**Verified against**: null
+**Status**: unverified
+**Blocked reason**: operator run required on a machine with a real cloud provider and Obsidian
+
+### MC-08 — Resource table and Bases block in Obsidian
+
+**Claim**: With core Bases enabled, the note's Markdown resource table is alphabetical and the collapsible "Sort and filter resources" Bases block lists the created stubs and sorts and filters.
+**Doc**: CLAUDE.md
+**Covers**: backend/note.py
+**Procedure**: Using the note from MC-07, with the core Bases plugin enabled, open it in Obsidian. Confirm the Markdown resource table is in alphabetical order, expand "Sort and filter resources", confirm it lists the stubs created in the resources folder, and confirm sorting and filtering work.
+**Last verified**: null
+**Verified against**: null
+**Status**: unverified
+**Blocked reason**: depends on MC-07; operator run required in Obsidian
+
+## Real imports on the Claude subscription
+
+Deferred on 2026-11-16: these imports need Obsidian and live subscription quota. Already verified: one YouTube single import produced a note with `import_model: "claude-cli:sonnet"`. For each check, set the vault's provider to "Claude subscription" (`claude-cli`), confirm `curl -fsS http://127.0.0.1:8000/health`, then check that the note's `import_model` / `import_resolved_model` start with `claude-cli:` and that the note is in the expected folder below `MEDIA_Transcripts`. Record the date, model and outcome only, with no transcript text or credentials.
+
+### MC-09 — Apple Podcasts episode on the Claude subscription
+
+**Claim**: A podcast episode imports end to end on the subscription, including Whisper when the feed has no RSS transcript.
+**Doc**: docs/claude-cli-contract.md
+**Covers**: backend/claude_cli.py
+**Procedure**: In the Import modal, paste a short `podcasts.apple.com/...?i=...` episode URL and import it. Confirm the note lands in `Podcasts` with `claude-cli:` model frontmatter.
+**Last verified**: null
+**Verified against**: null
+**Status**: unverified
+**Blocked reason**: operator run required in Obsidian with subscription quota
+
+### MC-10 — Web article on the Claude subscription
+
+**Claim**: A web article imports through `/process` (in the modal, not the queue) on the subscription.
+**Doc**: docs/claude-cli-contract.md
+**Covers**: backend/claude_cli.py
+**Procedure**: In the Import modal, paste a blog or news URL and import it. Confirm the note lands in `Articles` with `claude-cli:` model frontmatter.
+**Last verified**: null
+**Verified against**: null
+**Status**: unverified
+**Blocked reason**: operator run required in Obsidian with subscription quota
+
+### MC-11 — 3-item channel batch on the Claude subscription
+
+**Claim**: A 3-item YouTube channel batch finishes on the subscription without errors, and a usage limit (if hit) pauses the lane until the reset time while the item stays pending.
+**Doc**: docs/claude-cli-contract.md
+**Covers**: backend/main.py
+**Procedure**: Paste a YouTube channel URL, set the count to 3, preview, then confirm. Items are paced 15–45 s apart. In the Queue view, all three items must end under Finished without errors. If a real usage-limit event occurs, check the pause message and that the lane resumes after `resets_at` (see "Error mapping" in `docs/claude-cli-contract.md`).
+**Last verified**: null
+**Verified against**: null
+**Status**: unverified
+**Blocked reason**: operator run required in Obsidian with subscription quota
