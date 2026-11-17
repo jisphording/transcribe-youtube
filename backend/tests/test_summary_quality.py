@@ -78,8 +78,7 @@ class SummaryQualityTests(unittest.TestCase):
             with self.subTest(source_words=source_words, summary_words=summary_words):
                 result = done({'extended_summary': 'detail ' * summary_words})
                 with patch.object(main, '_stream_llm', side_effect=lambda *args: iter([result])) as stream:
-                    updates = list(main._stream_with_extended_target(
-                        model, 'system', 'input', None, 'source ' * source_words, 'extended_summary'))
+                    updates = list(main._stream_complete(model, 'system', 'input', None))
                 self.assertEqual(stream.call_count, 1)
                 self.assertEqual(updates[-1], result)
 
@@ -99,8 +98,7 @@ class SummaryQualityTests(unittest.TestCase):
                 result = {**done({'extended_summary': 'detail ' * 50}), 'stop_reason': reason}
                 with patch.object(main, '_stream_llm', return_value=iter([result])):
                     with self.assertRaisesRegex(RuntimeError, 'output limit'):
-                        list(main._stream_with_extended_target(
-                            main.SONNET, 'system', 'input', None, 'source ' * 100, 'extended_summary'))
+                        list(main._stream_complete(main.SONNET, 'system', 'input', None))
 
     def test_long_cloud_extended_preserves_last_segment_and_its_resources(self):
         chunks = ['first ' * 100, 'I use Obsidian. ' + 'last ' * 100]

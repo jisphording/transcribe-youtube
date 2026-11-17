@@ -124,14 +124,14 @@ You will receive one segment of a raw transcript. Return a JSON object with thes
 1. "heading": Short title (3-6 words) for the segment's topic.
 2. "transcript": The segment in clean verbatim: remove only hesitation sounds ("um", "uh"), stutters, abandoned false starts and pause tics ("you know", "like", "I mean" while searching for words). Keep hedges, emphasis and every word that affects meaning. Keep the original wording, keep paragraph breaks, add nothing.
 3. "notes": 2-5 terse bullet sentences (one string each, in an array) with the segment's key points.
-{resources_key}{extended_key}{focus_key}
+{resources_line}{extended_line}{focus_line}
 Return ONLY the JSON object."""
 
 _LOCAL_NOTES_SYSTEM = """You are a note taker.
 You will receive one segment of a raw transcript. Return a JSON object with these keys:
 1. "heading": Short title (3-6 words) for the segment's topic.
 2. "notes": 2-5 terse bullet sentences (one string each, in an array) with the segment's key points.
-{resources_key}{extended_key}{focus_key}
+{resources_line}{extended_line}{focus_line}
 Return ONLY the JSON object."""
 
 _LOCAL_RESOURCES_KEY = '{n}. "resources": Array of objects with "name", "type" and "mention" (a short exact source excerpt containing the name). Only resources explicitly named in this original segment; never infer or add names from metadata or outside knowledge. [] if none.'
@@ -150,9 +150,9 @@ def _local_chunk_system(notes_only: bool, extract_resources: bool, include_exten
     n += 1 if include_extended else 0
     focus_str = _LOCAL_FOCUS_KEY.format(n=n) if include_focus else ""
     result = template.format(
-        resources_key="\n" + resources_str if resources_str else "",
-        extended_key="\n" + extended_str if extended_str else "",
-        focus_key="\n" + focus_str if focus_str else "",
+        resources_line="\n" + resources_str if resources_str else "",
+        extended_line="\n" + extended_str if extended_str else "",
+        focus_line="\n" + focus_str if focus_str else "",
     )
 
     return result + ("\n" + RESOURCE_RULES if extract_resources else "")
@@ -375,7 +375,7 @@ def _local_chunk(
         user += f"\nFocus topic: {focus_topic}"
     raw = None
     try:
-        for update in _stream_with_extended_target(model, system, user, None, chunk, "extended" if '"extended"' in system else ""):
+        for update in _stream_complete(model, system, user, None):
             if update["type"] == "done":
                 raw = update["response"]
                 stats["in"] += update["input_tokens"]
@@ -508,9 +508,7 @@ def _stream_llm(model: str, system_prompt: str, user_message: str, effort: str |
     return stream_claude(model, system_prompt, user_message, effort)
 
 
-def _stream_with_extended_target(
-    model: str, system: str, user: str, effort: str | None, source_text: str, extended_key: str,
-):
+def _stream_complete(model: str, system: str, user: str, effort: str | None):
     """Accept approximate summary lengths; reject responses stopped by an output limit."""
     for update in _stream_llm(model, system, user, effort):
         if update["type"] != "done":
@@ -946,10 +944,7 @@ def _run_claude_and_note(
                 chunk_user += f"\nFocus instruction: {request.focus_topic}"
             raw_chunk = None
             try:
-                for update in _stream_with_extended_target(
-                    model, chunk_system, chunk_user, effort, chunk,
-                    "extended_summary" if include_extended_in_chunks else "",
-                ):
+                for update in _stream_complete(model, chunk_system, chunk_user, effort):
                     if update["type"] == "done":
                         if update["stop_reason"] == "refusal":
                             yield _sse_event("error", f"{REFUSAL_MESSAGE} (chunk {i + 1})")
@@ -1141,10 +1136,7 @@ Please process this transcript according to the instructions."""
 
         raw_response = None
         try:
-            for update in _stream_with_extended_target(
-                model, system_prompt, user_message, effort, raw_text,
-                "extended_summary" if include_extended_in_chunks else "",
-            ):
+            for update in _stream_complete(model, system_prompt, user_message, effort):
                 if update["type"] == "progress":
                     elapsed = _fmt_elapsed(update["elapsed"])
                     in_tok = _fmt_tokens(update["input_tokens"])
